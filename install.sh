@@ -5,11 +5,20 @@
 # Config-Repo unter ~/nixos-config und installiert. Keine persoenlichen Daten im Skript.
 #
 # Pruef-Lauf (nur Dateien erzeugen, nichts loeschen):
-#   nix-shell -p git mkpasswd pciutils --run 'bash install.sh --dry-run'
+#   bash install.sh --dry-run
 # Echter Lauf:
-#   nix-shell -p git mkpasswd pciutils --run 'bash install.sh'
+#   bash install.sh
+# (Das Skript holt fehlende Tools - git/mkpasswd/pciutils - selbst via nix-shell.)
 #
 set -euo pipefail
+
+# Selbst-Bootstrap: fehlen git/mkpasswd/pciutils, einmal in einer nix-shell mit
+# diesen Tools neu starten. So genuegt der Aufruf:  bash install.sh [--dry-run]
+if [ -z "${INSTALLER_BOOTSTRAPPED:-}" ] \
+   && { ! command -v git >/dev/null 2>&1 || ! command -v mkpasswd >/dev/null 2>&1 || ! command -v lspci >/dev/null 2>&1; }; then
+  echo "==> Hole Tools (git mkpasswd pciutils) via nix-shell und starte neu ..."
+  exec nix-shell -p git mkpasswd pciutils --run "INSTALLER_BOOTSTRAPPED=1 exec bash $(printf '%q ' "$0" "$@")"
+fi
 
 usage() {
   cat <<'USAGE'
@@ -21,8 +30,7 @@ install.sh - generischer NixOS-First-Boot-Installer
                   nichts partitionieren / loeschen / installieren
   --help, -h      diese Hilfe
 
-Benoetigt git, mkpasswd, pciutils, z.B.:
-  nix-shell -p git mkpasswd pciutils --run 'bash install.sh --dry-run'
+Das Skript holt fehlende Tools (git, mkpasswd, pciutils) selbst via nix-shell.
 USAGE
 }
 
@@ -41,7 +49,7 @@ export NIX_CONFIG="extra-experimental-features = nix-command flakes"
 
 # ===================== 0. Preflight =====================
 for t in lsblk lspci git mkpasswd; do
-  command -v "$t" >/dev/null 2>&1 || { echo "FEHLER: '$t' fehlt - starte via: nix-shell -p git mkpasswd pciutils --run 'bash install.sh'" >&2; exit 1; }
+  command -v "$t" >/dev/null 2>&1 || { echo "FEHLER: '$t' fehlt (nix-shell-Bootstrap nicht erfolgt?)." >&2; exit 1; }
 done
 if [ "$DRY_RUN" != "1" ]; then
   [ -d /sys/firmware/efi ] || { echo "FEHLER: nicht im UEFI-Modus gebootet (systemd-boot braucht UEFI; im BIOS auf UEFI umstellen)." >&2; exit 1; }
