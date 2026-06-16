@@ -490,11 +490,29 @@ sudo nixos-generate-config --no-filesystems --root /mnt
 sudo cp /mnt/etc/nixos/hardware-configuration.nix "hosts/$HOST/hardware-configuration.nix"
 
 sudo mkdir -p /mnt/persist/secrets
-echo "==> Passwort fuer Benutzer '$USER_':"
-mkpasswd -m yescrypt | sudo tee "/mnt/persist/secrets/$USER_.hash" >/dev/null
-echo "==> Passwort fuer 'root':"
-mkpasswd -m yescrypt | sudo tee /mnt/persist/secrets/root.hash >/dev/null
+
+# Passwort verdeckt + doppelt abfragen, abgleichen, dann als yescrypt-Hash speichern.
+ask_password() {   # $1 = Anzeige-Name; gibt den Hash auf stdout aus
+  local p1 p2 h
+  while true; do
+    printf "==> Passwort fuer %s: " "$1" >&2
+    read -rs p1 </dev/tty; printf '\n' >&2
+    printf "    Passwort wiederholen: " >&2
+    read -rs p2 </dev/tty; printf '\n' >&2
+    if [ -z "$p1" ]; then printf "    Leer - bitte erneut.\n" >&2; continue; fi
+    if [ "$p1" != "$p2" ]; then printf "    Passwoerter stimmen nicht ueberein - bitte erneut.\n" >&2; continue; fi
+    h="$(printf '%s' "$p1" | mkpasswd -m yescrypt -s)" || { printf "    mkpasswd-Fehler - bitte erneut.\n" >&2; continue; }
+    [ -n "$h" ] || { printf "    leerer Hash - bitte erneut.\n" >&2; continue; }
+    printf '%s' "$h"; return 0
+  done
+}
+ask_password "Benutzer '$USER_'" | sudo tee "/mnt/persist/secrets/$USER_.hash" >/dev/null
+ask_password "'root'"            | sudo tee /mnt/persist/secrets/root.hash >/dev/null
 sudo chmod 600 /mnt/persist/secrets/*.hash
+# Sicherheitsnetz: leere Hash-Dateien wuerden Login unmoeglich machen.
+for _hf in "/mnt/persist/secrets/$USER_.hash" /mnt/persist/secrets/root.hash; do
+  sudo test -s "$_hf" || { echo "FEHLER: $_hf ist leer - Abbruch (sonst kein Login moeglich)." >&2; exit 1; }
+done
 
 git add -A
 git -c user.email=installer@localhost -c user.name=installer commit -q -m "Initiale Config ($HOST)" || true
