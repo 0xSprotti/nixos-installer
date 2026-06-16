@@ -50,15 +50,44 @@ Danach: Stick ziehen, `sudo reboot`.
 **Abgefragt:** Hostname, Benutzername, Zeitzone, Locale, Tastaturlayout
 (einzeln wie `de`/`us`/`gb` oder Kombination wie `de,us` — umschaltbar mit Alt+Shift).
 
-**Automatisch erkannt:** die Ziel-Platte (die stabile `by-id` wird in `disk.nix`
-gesetzt, `nvme-eui`/`wwn` bevorzugt). GPU- und WLAN-PCI-IDs werden zusätzlich in
-`hosts/<host>/DETECTED-HARDWARE.txt` als Referenz für spätere Schritte abgelegt.
+**Automatisch erkannt:** alle internen Platten (USB-, Wechsel- und `loop`-Geräte
+werden ausgeblendet). Die stabile `by-id` wird in `disk.nix` gesetzt
+(`nvme-eui`/`wwn` bevorzugt). GPU- und WLAN-PCI-IDs landen zusätzlich in
+`hosts/<host>/DETECTED-HARDWARE.txt` als Referenz für spätere Schritte.
+
+Bei **genau einer** Platte wird sie als Default angeboten (Enter genügt). Bei
+**mehreren** erscheint ein Menü mit den Layout-Modi (siehe unten).
+
+## Mehrere Platten: Layout-Modi
+
+Wird mehr als eine interne Platte erkannt, fragt der Installer nach einem Modus:
+
+1. **Eine Platte** *(Standard, am besten getestet)* — volles Layout auf einer
+   gewählten Platte: GPT + ESP + LUKS2 + btrfs.
+2. **Pool** — `mdadm`-RAID0 über die gewählten Platten, darüber **ein** LUKS und
+   **ein** btrfs. Mehr Kapazität, **keine** Redundanz (eine Platte fällt aus → alles weg).
+3. **Spiegel** — `mdadm`-RAID1. Übersteht den Ausfall einer Platte; nutzbarer Platz
+   ≈ kleinste Platte.
+4. **Getrennte Rollen** — System (LUKS+btrfs) auf einer Platte, die übrigen je als
+   separate verschlüsselte btrfs-Datenplatte unter `/data2`, `/data3`, …
+
+Bei Pool/Spiegel liegt **ein** LUKS über dem RAID → **eine** Passphrase; die ESP
+(`/boot`) liegt auf der ersten Platte. `mdadm`-Assembly und initrd richtet disko
+automatisch ein. Bei Getrennten Rollen für alle Platten dieselbe Passphrase wählen —
+dann entsperrt systemd beim Boot meist mit einer einzigen Eingabe.
+
+> **⚠️ Experimentell:** Die Modi 2–4 sind nach den offiziellen disko-Beispielen
+> gebaut, aber **nicht auf echter Hardware getestet**. Vor dem echten Lauf unbedingt
+> `--dry-run` nutzen und die erzeugte `disk.nix` prüfen. Der Einzelplatten-Pfad (1)
+> ist der erprobte Standard. `mdadm`-RAID1 bietet zudem keine btrfs-Prüfsummen-
+> Selbstheilung — für reine Integrität ist eine Einzelplatte mit Backups oft die
+> einfachere Wahl.
 
 ## ⚠️ Datenverlust & Sicherheit
 
-- Der Installationsschritt **löscht die gewählte Platte vollständig**.
-- Prüfe in der Zusammenfassung, dass die `device`-Zeile wirklich deine **Zielplatte**
-  ist (nicht der Installer-Stick), bevor du `JA` tippst.
+- Der Installationsschritt **löscht die gewählte(n) Platte(n) vollständig**.
+- Prüfe in der Zusammenfassung die **Liste der Platten**, die gelöscht werden
+  (nicht den Installer-Stick!), bevor du `JA` tippst.
 - Nutze zuerst `--dry-run` und sieh dir die erzeugte Config an.
 - Im Repo liegen **keine Geheimnisse** — Passwort-Hashes werden zur Laufzeit erzeugt
   und nur auf `/persist` gespeichert.
@@ -69,7 +98,7 @@ gesetzt, `nvme-eui`/`wwn` bevorzugt). GPU- und WLAN-PCI-IDs werden zusätzlich i
 ~/nixos-config/
 ├── flake.nix
 └── hosts/<host>/
-    ├── disk.nix                  # disko: GPT + LUKS2 + btrfs (erkannte by-id)
+    ├── disk.nix                  # disko: GPT + LUKS2 + btrfs (je nach Platten-Modus)
     ├── configuration.nix         # Basis-System (Boot, Netz, Locale, KDE, Benutzer)
     ├── hardware-configuration.nix # live erzeugt
     └── DETECTED-HARDWARE.txt      # GPU/WLAN-IDs als Referenz (nicht aktiv)
