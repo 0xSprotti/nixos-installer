@@ -29,16 +29,19 @@ eigenen Schlüsseln usw. baust du anschließend auf dieser Grundlage auf.
 Im Live-Installer:
 
 ```bash
-# Skript holen (öffentlich, ohne Token)
-nix-shell -p curl --run 'curl -O https://raw.githubusercontent.com/0xSprotti/nixos-installer/main/install.sh'
+# Skript holen (curl ist im Installer i.d.R. vorhanden; sonst: nix-shell -p curl --run '...')
+curl -O https://raw.githubusercontent.com/0xSprotti/nixos-installer/main/install.sh
 
 # 1) Prüf-Lauf: erzeugt NUR die Config-Dateien, löscht NICHTS
-nix-shell -p git mkpasswd pciutils --run 'bash install.sh --dry-run'
+bash install.sh --dry-run
 #    -> danach ~/nixos-config ansehen und prüfen
 
 # 2) Echter Lauf: partitioniert, verschlüsselt und installiert
-nix-shell -p git mkpasswd pciutils --run 'bash install.sh'
+bash install.sh
 ```
+
+Fehlende Tools (`git`, `mkpasswd`, `pciutils`) holt sich das Skript selbst per `nix-shell` —
+du musst den Aufruf also nicht mehr darin verpacken.
 
 Danach: Stick ziehen, `sudo reboot`.
 
