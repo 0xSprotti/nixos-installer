@@ -81,24 +81,147 @@ esac
 # ===================== 2. Zielplatte erkennen =====================
 echo
 echo "Verfuegbare Datenträger (USB ausgeblendet):"
-lsblk -dpno NAME,SIZE,MODEL,TRAN | grep -vi usb || true
+lsblk -dpno NAME,SIZE,MODEL,TRAN | grep -viE 'usb|loop' || true
 echo "  (Falls deine Platte fehlt: in anderem Terminal 'lsblk' pruefen.)"
-read -rp "Ziel-Datenträger (z.B. /dev/nvme0n1) — WIRD VOLLSTAENDIG GELOESCHT: " DISK
-[ -b "$DISK" ] || { echo "FEHLER: $DISK ist kein Blockgeraet." >&2; exit 1; }
+# Interne Platten als Auswahl-Kandidaten sammeln:
+# TYPE=disk (also kein loop), nicht USB, nicht wechselbar.
+DISK_CANDS=()
+while read -r _name; do
+  [ -n "$_name" ] || continue
+  if [ "$(lsblk -dno TYPE "$_name" 2>/dev/null)" != "disk" ]; then continue; fi
+  if [ "$(lsblk -dno TRAN "$_name" 2>/dev/null)" = "usb" ]; then continue; fi
+  if [ "$(lsblk -dno RM   "$_name" 2>/dev/null)" = "1" ]; then continue; fi
+  DISK_CANDS+=("$_name")
+done < <(lsblk -dpno NAME)
 
-# stabile by-id ermitteln (eui/wwn bevorzugt, sonst model-serial; ohne Partitionen)
-BYID=""
-for link in /dev/disk/by-id/*; do
-  case "$link" in *-part*) continue ;; esac
-  if [ "$(readlink -f "$link")" = "$(readlink -f "$DISK")" ]; then
-    case "$link" in
-      */nvme-eui.*|*/wwn-*) BYID="$link"; break ;;
-      *) if [ -z "$BYID" ]; then BYID="$link"; fi ;;
-    esac
-  fi
-done
-if [ -z "$BYID" ]; then BYID="$DISK"; fi
-echo "Stabile Kennung: $BYID"
+NCANDS="${#DISK_CANDS[@]}"
+
+# stabile by-id zu einem /dev-Pfad ermitteln (eui/wwn bevorzugt, sonst model-serial)
+resolve_byid() {
+  local dev b="" link
+  dev="$(readlink -f "$1")"
+  for link in /dev/disk/by-id/*; do
+    [ -e "$link" ] || continue
+    case "$link" in *-part*) continue ;; esac
+    if [ "$(readlink -f "$link")" = "$dev" ]; then
+      case "$link" in
+        */nvme-eui.*|*/wwn-*) echo "$link"; return 0 ;;
+        *) [ -z "$b" ] && b="$link" ;;
+      esac
+    fi
+  done
+  [ -n "$b" ] && echo "$b" || echo "$1"
+}
+
+_is_num() { printf '%s' "$1" | grep -qE '^[0-9]+$'; }
+_show_list() {
+  local i=1 d
+  echo "Erkannte interne Platten:"
+  for d in "${DISK_CANDS[@]}"; do printf "  %d) %s\n" "$i" "$(lsblk -dpno NAME,SIZE,MODEL "$d" 2>/dev/null)"; i=$((i+1)); done
+}
+_pick_one() {   # gibt den gewaehlten /dev-Pfad auf stdout aus (Nummer aus Liste oder Pfad)
+  local prompt="$1" sel n
+  while true; do
+    printf '%s' "$prompt" >&2
+    read -r sel; sel="${sel:-1}"
+    if _is_num "$sel"; then
+      n=$((10#$sel))
+      if [ "$n" -ge 1 ] && [ "$n" -le "$NCANDS" ]; then printf '%s' "${DISK_CANDS[$((n - 1))]}"; return 0; fi
+      echo "  Ungültige Nummer (1..$NCANDS) — bitte erneut." >&2; continue
+    fi
+    if [ -b "$sel" ]; then printf '%s' "$sel"; return 0; fi
+    echo "  '$sel' ist weder Nummer (1..$NCANDS) noch Blockgerät — bitte erneut." >&2
+  done
+}
+
+# ---- Modus bestimmen (nur bei mehreren Platten gibt es eine Wahl) ----
+if [ "$NCANDS" -ge 2 ]; then
+  echo
+  _show_list
+  echo
+  echo "Modus bei mehreren Platten:"
+  echo "  1) Eine Platte            (Standard, am besten getestet)"
+  echo "  2) Pool      - mdadm-RAID0 + LUKS + btrfs   (mehr Platz, KEINE Redundanz)"
+  echo "  3) Spiegel   - mdadm-RAID1 + LUKS + btrfs   (ausfallsicher, Platz = kleinste Platte)"
+  echo "  4) Getrennte Rollen - System auf 1 Platte, Rest als verschluesselte Datenplatten"
+  echo "  HINWEIS: 2-4 sind EXPERIMENTELL (hier nicht auf Hardware getestet) -> --dry-run + disk.nix pruefen!"
+  read -rp "Modus [1]: " MSEL; MSEL="${MSEL:-1}"
+  case "$MSEL" in 2) MODE="pool" ;; 3) MODE="raid1" ;; 4) MODE="separate" ;; *) MODE="single" ;; esac
+else
+  MODE="single"
+fi
+
+# ---- Geraete je Modus auswaehlen + by-id aufloesen ----
+DISK=""; BYID=""; BYIDS=(); DATA_BYIDS=(); MODE_DESC=""; DISKS_DESC=""; LVL=0
+
+case "$MODE" in
+  single)
+    if [ "$NCANDS" -ge 2 ]; then
+      DISK="$(_pick_one "Welche Platte? [1] (Nummer oder Gerätepfad) — WIRD VOLLSTAENDIG GELOESCHT: ")"
+    elif [ "$NCANDS" -eq 1 ]; then
+      DEFAULT_DISK="${DISK_CANDS[0]}"
+      while true; do
+        read -rp "Ziel-Datenträger [${DEFAULT_DISK}] — WIRD VOLLSTAENDIG GELOESCHT (Enter = Default, Strg-C = Abbruch): " DISK
+        DISK="${DISK:-$DEFAULT_DISK}"; [ -b "$DISK" ] && break
+        echo "  '$DISK' ist kein Blockgerät — bitte erneut eingeben." >&2
+      done
+    else
+      while true; do
+        read -rp "Ziel-Datenträger (z.B. /dev/nvme0n1) — WIRD VOLLSTAENDIG GELOESCHT (Strg-C = Abbruch): " DISK
+        [ -n "$DISK" ] || { echo "  Bitte einen Gerätepfad angeben." >&2; continue; }
+        [ -b "$DISK" ] && break; echo "  '$DISK' ist kein Blockgerät — bitte erneut eingeben." >&2
+      done
+    fi
+    BYID="$(resolve_byid "$DISK")"
+    MODE_DESC="Eine Platte (LUKS + btrfs)"
+    DISKS_DESC="  - $BYID   ($DISK)"
+    ;;
+
+  pool|raid1)
+    if [ "$MODE" = "pool" ]; then LVL=0; MODE_DESC="Pool / mdadm-RAID0 + LUKS + btrfs (KEINE Redundanz)";
+    else LVL=1; MODE_DESC="Spiegel / mdadm-RAID1 + LUKS + btrfs (ausfallsicher)"; fi
+    while true; do
+      read -rp "Welche Platten in den Verbund? (verschiedene Nummern, z.B. 1,2  oder 'alle') [alle]: " MSEL2
+      MSEL2="${MSEL2:-alle}"; _seldevs=()
+      if [ "$MSEL2" = "alle" ] || [ "$MSEL2" = "all" ]; then
+        _seldevs=("${DISK_CANDS[@]}")
+      else
+        _ok=1; IFS=', ' read -ra _parts <<< "$MSEL2" || true
+        for _p in "${_parts[@]}"; do
+          [ -n "$_p" ] || continue
+          if _is_num "$_p"; then _n2=$((10#$_p))
+            if [ "$_n2" -ge 1 ] && [ "$_n2" -le "$NCANDS" ]; then _seldevs+=("${DISK_CANDS[$((_n2 - 1))]}"); else _ok=0; fi
+          else _ok=0; fi
+        done
+        [ "$_ok" = "1" ] || { echo "  Ungültige Auswahl (Nummern 1..$NCANDS)." >&2; continue; }
+      fi
+      [ "${#_seldevs[@]}" -ge 2 ] && break
+      echo "  Bitte mindestens 2 Platten waehlen." >&2
+    done
+    _first=1
+    for _d in "${_seldevs[@]}"; do
+      _b="$(resolve_byid "$_d")"; BYIDS+=("$_b")
+      if [ "$_first" = "1" ]; then DISKS_DESC="  - $_b   (ESP + RAID-Mitglied)"; _first=0
+      else DISKS_DESC="$DISKS_DESC
+  - $_b   (RAID-Mitglied)"; fi
+    done
+    ;;
+
+  separate)
+    MODE_DESC="Getrennte Rollen (System + Datenplatten, je LUKS+btrfs)"
+    _sysdev="$(_pick_one "System-Platte? [1] (Nummer oder Gerätepfad) — WIRD VOLLSTAENDIG GELOESCHT: ")"
+    BYID="$(resolve_byid "$_sysdev")"
+    DISKS_DESC="  - $BYID   (System: ESP + root)"
+    _n3=2
+    for _d in "${DISK_CANDS[@]}"; do
+      [ "$(readlink -f "$_d")" = "$(readlink -f "$_sysdev")" ] && continue
+      _b="$(resolve_byid "$_d")"; DATA_BYIDS+=("$_b")
+      DISKS_DESC="$DISKS_DESC
+  - $_b   (Daten -> /data$_n3)"
+      _n3=$((_n3 + 1))
+    done
+    ;;
+esac
 
 # Hardware-Report fuer den spaeteren vfio-Schritt (nur Referenz)
 REPORT_GPU="$(lspci -nn | grep -Ei '3d|vga|display' || true)"
@@ -114,9 +237,10 @@ cat <<SUMMARY
   Zeitzone   : $TZ
   Locale     : $LOC
   Tastatur   : $XKB    (mehrere Layouts: $MULTI)
-  Zielplatte : $BYID
-               -> $DISK   WIRD VOLLSTAENDIG GELOESCHT
-  Modus      : $( [ "$DRY_RUN" = "1" ] && echo "DRY_RUN (nur Dateien)" || echo "ECHT (installiert)" )
+  Layout     : $MODE_DESC
+  Platten    : (werden VOLLSTAENDIG GELOESCHT)
+$DISKS_DESC
+  Aktion     : $( [ "$DRY_RUN" = "1" ] && echo "DRY_RUN (nur Dateien)" || echo "ECHT (installiert)" )
 ========================================================
 SUMMARY
 read -rp "Alles korrekt? Tippe GROSS 'JA': " OK
@@ -134,7 +258,7 @@ cat > flake.nix <<EOF
   description = "NixOS - $HOST";
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
-    disko = { url = "github:nix-community/disko"; inputs.nixpkgs.follows = "nixpkgs"; };
+    disko = { url = "github:nix-community/disko/latest"; inputs.nixpkgs.follows = "nixpkgs"; };
   };
   outputs = { self, nixpkgs, disko, ... }: {
     nixosConfigurations.$HOST = nixpkgs.lib.nixosSystem {
@@ -150,7 +274,20 @@ cat > flake.nix <<EOF
 }
 EOF
 
-cat > "hosts/$HOST/disk.nix" <<EOF
+# Wiederkehrender btrfs-Root (5 Subvolumes). Nix ist whitespace-unempfindlich,
+# daher als Variable wiederverwendbar.
+ROOT_SUBVOLS='subvolumes = {
+                "/root"    = { mountpoint = "/";        mountOptions = [ "compress=zstd" "noatime" ]; };
+                "/home"    = { mountpoint = "/home";    mountOptions = [ "compress=zstd" "noatime" ]; };
+                "/nix"     = { mountpoint = "/nix";     mountOptions = [ "compress=zstd" "noatime" ]; };
+                "/persist" = { mountpoint = "/persist"; mountOptions = [ "compress=zstd" "noatime" ]; };
+                "/log"     = { mountpoint = "/var/log"; mountOptions = [ "compress=zstd" "noatime" ]; };
+              };'
+
+DISKNIX="hosts/$HOST/disk.nix"
+case "$MODE" in
+  single)
+    cat > "$DISKNIX" <<EOF
 {
   disko.devices.disk.main = {
     type = "disk";
@@ -158,18 +295,12 @@ cat > "hosts/$HOST/disk.nix" <<EOF
     content = {
       type = "gpt";
       partitions = {
-        ESP = { priority = 1; size = "1G"; type = "EF00";
+        ESP = { priority = 1; size = "2G"; type = "EF00";
           content = { type = "filesystem"; format = "vfat"; mountpoint = "/boot"; mountOptions = [ "umask=0077" ]; }; };
         luks = { size = "100%";
           content = { type = "luks"; name = "cryptroot"; settings.allowDiscards = true;
             content = { type = "btrfs"; extraArgs = [ "-f" ];
-              subvolumes = {
-                "/root"    = { mountpoint = "/";        mountOptions = [ "compress=zstd" "noatime" ]; };
-                "/home"    = { mountpoint = "/home";    mountOptions = [ "compress=zstd" "noatime" ]; };
-                "/nix"     = { mountpoint = "/nix";     mountOptions = [ "compress=zstd" "noatime" ]; };
-                "/persist" = { mountpoint = "/persist"; mountOptions = [ "compress=zstd" "noatime" ]; };
-                "/log"     = { mountpoint = "/var/log"; mountOptions = [ "compress=zstd" "noatime" ]; };
-              };
+              $ROOT_SUBVOLS
             };
           };
         };
@@ -178,6 +309,113 @@ cat > "hosts/$HOST/disk.nix" <<EOF
   };
 }
 EOF
+    ;;
+
+  pool|raid1)
+    # Jede Platte: GPT mit mdraid-Mitglied (erste Platte zusaetzlich mit ESP).
+    # Darueber EIN mdadm-Verbund -> EIN LUKS -> btrfs (eine Passphrase, identische Root-Schicht).
+    {
+      echo "{"
+      echo "  disko.devices = {"
+      echo "    disk = {"
+      _i=1
+      for _b in "${BYIDS[@]}"; do
+        if [ "$_i" -eq 1 ]; then
+          cat <<EOF
+      disk$_i = {
+        type = "disk";
+        device = "$_b";
+        content = {
+          type = "gpt";
+          partitions = {
+            ESP = { priority = 1; size = "2G"; type = "EF00";
+              content = { type = "filesystem"; format = "vfat"; mountpoint = "/boot"; mountOptions = [ "umask=0077" ]; }; };
+            raid = { size = "100%"; content = { type = "mdraid"; name = "osraid"; }; };
+          };
+        };
+      };
+EOF
+        else
+          cat <<EOF
+      disk$_i = {
+        type = "disk";
+        device = "$_b";
+        content = { type = "gpt"; partitions = {
+          raid = { size = "100%"; content = { type = "mdraid"; name = "osraid"; }; };
+        }; };
+      };
+EOF
+        fi
+        _i=$((_i + 1))
+      done
+      cat <<EOF
+    };
+    mdadm.osraid = {
+      type = "mdadm";
+      level = $LVL;
+      content = {
+        type = "luks"; name = "cryptroot"; settings.allowDiscards = true;
+        content = { type = "btrfs"; extraArgs = [ "-f" ];
+          $ROOT_SUBVOLS
+        };
+      };
+    };
+  };
+}
+EOF
+    } > "$DISKNIX"
+    ;;
+
+  separate)
+    # System-Platte (ESP + LUKS + btrfs root) + je Datenplatte eigenes LUKS + btrfs.
+    # Gleiche Passphrase verwenden -> systemd-initrd entsperrt i.d.R. mit einer Eingabe.
+    {
+      echo "{"
+      echo "  disko.devices.disk = {"
+      cat <<EOF
+    main = {
+      type = "disk";
+      device = "$BYID";
+      content = {
+        type = "gpt";
+        partitions = {
+          ESP = { priority = 1; size = "2G"; type = "EF00";
+            content = { type = "filesystem"; format = "vfat"; mountpoint = "/boot"; mountOptions = [ "umask=0077" ]; }; };
+          luks = { size = "100%";
+            content = { type = "luks"; name = "cryptroot"; settings.allowDiscards = true;
+              content = { type = "btrfs"; extraArgs = [ "-f" ];
+                $ROOT_SUBVOLS
+              };
+            };
+          };
+        };
+      };
+    };
+EOF
+      _n=2
+      for _b in "${DATA_BYIDS[@]}"; do
+        cat <<EOF
+    data$_n = {
+      type = "disk";
+      device = "$_b";
+      content = { type = "gpt"; partitions = {
+        luks = { size = "100%";
+          content = { type = "luks"; name = "cryptdata$_n"; settings.allowDiscards = true;
+            content = { type = "btrfs"; extraArgs = [ "-f" ];
+              subvolumes = { "/data" = { mountpoint = "/data$_n"; mountOptions = [ "compress=zstd" "noatime" ]; }; };
+            };
+          };
+        };
+      }; };
+    };
+EOF
+        _n=$((_n + 1))
+      done
+      echo "  };"
+      echo "}"
+    } > "$DISKNIX"
+    ;;
+esac
 
 XKBOPT=""
 case "$XKB" in *,*) XKBOPT='  services.xserver.xkb.options = "grp:alt_shift_toggle";' ;; esac
@@ -260,7 +498,8 @@ sudo chmod 600 /mnt/persist/secrets/*.hash
 
 git add -A
 git -c user.email=installer@localhost -c user.name=installer commit -q -m "Initiale Config ($HOST)" || true
-sudo nixos-install --flake ".#$HOST" --no-root-passwd
+sudo env NIX_CONFIG="extra-experimental-features = nix-command flakes" \
+  nixos-install --flake ".#$HOST" --no-root-passwd
 
 # Generierte Config aufs installierte System uebernehmen (sonst nur im Live-System vorhanden)
 if [ -d "/mnt/home/$USER_" ]; then
