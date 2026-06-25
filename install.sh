@@ -30,6 +30,11 @@ install.sh - generischer NixOS-First-Boot-Installer
                   nichts partitionieren / loeschen / installieren
   --help, -h      diese Hilfe
 
+Sicherheit: Der Installer laeuft nur vom Live-ISO (dort ist "/" ein 'overlay'). Auf einem
+installierten System bricht er ab, damit ein versehentlicher Lauf nichts zerstoert.
+Bewusster Override fuer Sonderfaelle:  ALLOW_NONLIVE=1 bash install.sh
+(dann folgt vor dem Loeschen eine getippte Bestaetigung der Ziel-Platte).
+
 Das Skript holt fehlende Tools (git, mkpasswd, pciutils) selbst via nix-shell.
 USAGE
 }
@@ -56,6 +61,32 @@ if [ "$DRY_RUN" != "1" ]; then
   timeout 5 bash -c ': < /dev/tcp/cache.nixos.org/443' 2>/dev/null || { echo "FEHLER: keine Netzverbindung zu cache.nixos.org:443. Erst Netz herstellen (LAN oder nmtui)." >&2; exit 1; }
 fi
 
+# ===================== 0b. Schutz: nur vom Live-Installer, nicht auf installiertem System =====================
+# Der Installer formatiert Platten (disko destroy,format). Ein versehentlicher Lauf auf einem
+# bereits installierten System wuerde es ZERSTOEREN. Auf dem NixOS-Installer-ISO ist "/" ein
+# 'overlay'; ein echtes On-Disk-Dateisystem deutet auf ein installiertes System hin -> abbrechen.
+# (Dry-Run ist ungefaehrlich und laeuft ueberall — daher nur im Echtlauf pruefen.)
+NONLIVE=0
+if [ "$DRY_RUN" != "1" ]; then
+  ROOT_FSTYPE="$(findmnt -nro FSTYPE / 2>/dev/null | head -n1 || true)"
+  case "$ROOT_FSTYPE" in
+    ext2|ext3|ext4|btrfs|xfs|f2fs|zfs|reiserfs|jfs)
+      if [ "${ALLOW_NONLIVE:-0}" = "1" ]; then
+        NONLIVE=1
+        echo "WARN: Root-Dateisystem ist '$ROOT_FSTYPE' (kein Live-Overlay) — Override ALLOW_NONLIVE=1 aktiv." >&2
+        echo "      Die Ziel-Platte wird gleich VOLLSTAENDIG GELOESCHT; getippte Bestaetigung folgt." >&2
+      else
+        echo "FEHLER: Root-Dateisystem ist '$ROOT_FSTYPE' — das sieht nach einem INSTALLIERTEN System aus," >&2
+        echo "        nicht nach dem Live-Installer (dort ist / ein 'overlay')." >&2
+        echo "        Dieser Installer LOESCHT Platten und darf nur vom NixOS-Installer-ISO laufen." >&2
+        echo "        -> Vom ISO booten und erneut starten." >&2
+        echo "        (Bewusster Override nur fuer Sonderfaelle:  ALLOW_NONLIVE=1 bash install.sh)" >&2
+        exit 1
+      fi
+      ;;
+  esac
+fi
+
 # ===================== 1. Abfragen =====================
 read -rp "Hostname [nixos]: " HOST;      HOST="${HOST:-nixos}"
 read -rp "Benutzername [user]: " USER_;  USER_="${USER_:-user}"
@@ -77,6 +108,12 @@ case "$KB" in
   6) read -rp "xkb-Layouts: " XKB; XKB="${XKB:-de}" ;;
   *) XKB="de" ;;
 esac
+
+# Optional: generische Update-Erinnerung (Desktop-Icon + stuendlicher Notify-Timer + update-all.sh).
+# Erzeugt modules/host-updates.nix + update-all.sh und haengt das Modul in die Host-Config.
+echo
+read -rp "Update-Erinnerung installieren? (Desktop-Icon + stuendlicher Update-Check) [j/N]: " HU
+case "$HU" in [jJyY]*) HOSTUPDATES=1 ;; *) HOSTUPDATES=0 ;; esac
 
 # ===================== 2. Zielplatte erkennen =====================
 echo
@@ -420,8 +457,14 @@ esac
 XKBOPT=""
 case "$XKB" in *,*) XKBOPT='  services.xserver.xkb.options = "grp:alt_shift_toggle";' ;; esac
 
-cat > "hosts/$HOST/configuration.nix" <<EOF
-{ config, pkgs, ... }:
+# ── Geteilter Desktop-Stack als generisches Modul (host-unabhaengig) ──────────
+# Regionale Werte (Zeitzone/Locale/Tastatur) werden hier fixiert -> konsistent ueber
+# alle Hosts. Spaeter aus jeder Host-Config importierbar (modulares Multi-Host-Setup).
+mkdir -p modules
+cat > modules/desktop.nix <<EOF
+# modules/desktop.nix — geteilte Desktop-Basis (generisch, host-unabhaengig).
+# Vom Installer erzeugt. Hostname/User/stateVersion stehen pro Host in hosts/<host>/.
+{ pkgs, ... }:
 {
   boot.loader.systemd-boot.enable = true;
   boot.loader.systemd-boot.configurationLimit = 10;   # ESP nicht mit alten Generationen volllaufen lassen
@@ -434,7 +477,6 @@ cat > "hosts/$HOST/configuration.nix" <<EOF
   zramSwap.enable = true;                          # komprimierter RAM-Swap (hibernate-sicher)
   # CPU-Microcode (intel/amd) setzt hardware-configuration.nix automatisch passend.
 
-  networking.hostName = "$HOST";
   networking.networkmanager.enable = true;
 
   time.timeZone = "$TZ";
@@ -447,6 +489,27 @@ $XKBOPT
   services.displayManager.sddm.enable = true;
   services.desktopManager.plasma6.enable = true;
 
+  nix.settings.experimental-features = [ "nix-command" "flakes" ];
+  environment.systemPackages = with pkgs; [ vim git ];
+}
+EOF
+
+# ── Schlanke Host-Config: importiert das/die Modul(e) + nur das Host-Spezifische ──
+# host-updates.nix wird nur eingehaengt, wenn oben danach gefragt wurde (HOSTUPDATES=1).
+IMPORTS="    ../../modules/desktop.nix"
+if [ "$HOSTUPDATES" = "1" ]; then
+  IMPORTS="$IMPORTS
+    ../../modules/host-updates.nix"
+fi
+cat > "hosts/$HOST/configuration.nix" <<EOF
+{ ... }:
+{
+  imports = [
+$IMPORTS
+  ];
+
+  networking.hostName = "$HOST";
+
   users.users.$USER_ = {
     isNormalUser = true;
     description = "$USER_";
@@ -455,12 +518,152 @@ $XKBOPT
   };
   users.users.root.hashedPasswordFile = "/persist/secrets/root.hash";
 
-  nix.settings.experimental-features = [ "nix-command" "flakes" ];
-  environment.systemPackages = with pkgs; [ vim git ];
-
   system.stateVersion = "26.05";
 }
 EOF
+
+# ── Optional: Update-Erinnerung (Icon + stuendlicher Check) + update-all.sh ──────
+# Nur wenn oben danach gefragt wurde. host-updates.nix ist generisch (haengt nur am Repo
+# unter ~/nixos-config) und wurde bereits in die Host-Config eingehaengt (IMPORTS).
+if [ "$HOSTUPDATES" = "1" ]; then
+cat > modules/host-updates.nix <<'NIXEOF'
+# modules/host-updates.nix
+# ─────────────────────────────────────────────────────────────────────────────
+# Generische Host-Wartung: erinnert an neue nixpkgs-Staende und bietet einen
+# Ein-Klick-Weg, alles zu aktualisieren. Haengt NUR am Repo unter ~/nixos-config
+# (kein dev-VM- oder Hardware-Bezug) -> jeder Host kann es einzeln importieren.
+#
+# Drei abgestimmte Teile: Erinnerung (stuendlicher User-Timer mit Snooze) -> Knopf
+# (Desktop-Icon) -> ein Befehl (update-all.sh: Flake bumpen + Host + alle VMs).
+# Bewusst KEIN system.autoUpgrade: nichts aktualisiert unbeaufsichtigt.
+{ lib, pkgs, ... }:
+let
+  # GUI-Launcher fuer Updates: oeffnet konsole und laesst update-all.sh laufen (Fenster bleibt offen).
+  # Wird vom Update-Icon UND von der "Jetzt aktualisieren"-Benachrichtigung aufgerufen.
+  nixos-update-gui = pkgs.writeShellScriptBin "nixos-update-gui" ''
+    exec konsole -e bash -lc 'cd "$HOME/nixos-config" && bash update-all.sh; echo; read -rp "Fertig — Enter schliesst das Fenster. "'
+  '';
+
+  # Hintergrund-Check: vergleicht den gepinnten nixpkgs-Stand (flake.lock) mit dem Upstream-Branch.
+  # Gibt es Neues UND ist keine Snooze aktiv -> Desktop-Benachrichtigung mit Snooze-Knoepfen.
+  # Vom systemd-User-Timer (stuendlich) ausgeloest. Tut nichts ohne grafische Sitzung.
+  nixos-update-check = pkgs.writeShellScript "nixos-update-check" ''
+    set -uo pipefail
+    export PATH=${lib.makeBinPath [ pkgs.git pkgs.jq pkgs.libnotify pkgs.coreutils ]}:/run/current-system/sw/bin:$PATH
+
+    REPO="$HOME/nixos-config"
+    LOCK="$REPO/flake.lock"
+    STATE="''${XDG_STATE_HOME:-$HOME/.local/state}/nixos-update-check"
+    SNOOZE="$STATE/snooze-until"
+    mkdir -p "$STATE"
+    [ -f "$LOCK" ] || exit 0
+
+    # Snooze aktiv? -> still raus.
+    now=$(date +%s)
+    if [ -f "$SNOOZE" ]; then
+      deadline=$(cat "$SNOOZE" 2>/dev/null || echo 0)
+      if [ "$deadline" -gt "$now" ] 2>/dev/null; then exit 0; fi
+    fi
+
+    # Gepinnten nixpkgs-Branch + Revision aus flake.lock lesen (robust ueber den root-Input).
+    node=$(jq -r '.nodes.root.inputs.nixpkgs // "nixpkgs"' "$LOCK")
+    ref=$(jq -r --arg n "$node" '.nodes[$n].original.ref // "nixos-26.05"' "$LOCK")
+    localrev=$(jq -r --arg n "$node" '.nodes[$n].locked.rev // ""' "$LOCK")
+    [ -n "$localrev" ] || exit 0
+
+    # Upstream-HEAD des Branches (leichtgewichtig; offline/Fehler/Timeout -> still raus).
+    upstream=$(timeout 20 git ls-remote https://github.com/NixOS/nixpkgs "refs/heads/$ref" 2>/dev/null | cut -f1)
+    [ -n "$upstream" ] || exit 0
+    [ "$localrev" = "$upstream" ] && exit 0
+
+    # Es gibt Neues -> benachrichtigen und bis zu 1 h auf eine Aktion warten.
+    # Snooze NUR schreiben, wenn notify-send wirklich anzeigen konnte — sonst wuerde ein stiller
+    # Fehlschlag (kein Notification-Daemon / keine GUI-Session) den naechsten echten Check
+    # faelschlich einen Tag unterdruecken.
+    rc=0
+    choice=$(timeout 3600 notify-send \
+      --app-name="NixOS" --icon=system-software-update --urgency=normal --expire-time=0 \
+      --action=now="Jetzt aktualisieren" \
+      --action=1h="In 1 Stunde" \
+      --action=8h="In 8 Stunden" \
+      --action=1d="Morgen" \
+      "NixOS-Updates verfuegbar" \
+      "Der nixpkgs-Kanal ($ref) ist weitergewandert. Jetzt aktualisieren oder spaeter erinnern lassen." \
+      2>/dev/null) || rc=$?
+
+    # rc=0 -> angezeigt (Aktion geklickt oder weggewischt); rc=124 -> Timeout (angezeigt, ignoriert);
+    # alles andere -> notify-send-Fehler, nichts angezeigt -> NICHT snoozen, beim naechsten Lauf neu.
+    if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then exit 0; fi
+
+    now=$(date +%s)   # nach evtl. langer Wartezeit neu (Snooze zaehlt ab dem Klick)
+    case "$choice" in
+      now|*"Jetzt"*)    exec ${nixos-update-gui}/bin/nixos-update-gui ;;
+      1h|*"1 Stunde"*)  echo $(( now + 3600 ))  > "$SNOOZE" ;;
+      8h|*"8 Stunden"*) echo $(( now + 28800 )) > "$SNOOZE" ;;
+      *)                echo $(( now + 86400 )) > "$SNOOZE" ;;   # morgen / weggewischt / Timeout
+    esac
+  '';
+in
+{
+  environment.systemPackages = with pkgs; [
+    libnotify          # notify-send im PATH (fuer Debugging; der Timer bringt es selbst mit)
+    nixos-update-gui
+    # Desktop-Icon: Update-Knopf -> oeffnet konsole und faehrt update-all.sh
+    # (Flake bumpen + Host + alle konfigurierten VMs). sudo-Passwort gibst du im Terminal ein.
+    (makeDesktopItem {
+      name = "nixos-update-all";
+      desktopName = "NixOS aktualisieren";
+      comment = "Flake bumpen, Host und alle konfigurierten VMs neu bauen";
+      exec = "nixos-update-gui";
+      icon = "system-software-update";
+      categories = [ "System" ];
+      terminal = false;
+    })
+  ];
+
+  # ===== Update-Benachrichtigung (stuendlicher Check, Snooze, Desktop-Notification) =====
+  # Bewusst KEIN system.autoUpgrade: nichts aktualisiert unbeaufsichtigt (insb. die VM darf das nie —
+  # ein Redeploy killt eine laufende Zed-Sitzung). Stattdessen: erinnern -> du drueckst den Knopf.
+  systemd.user.services.nixos-update-check = {
+    description = "Auf NixOS-Updates pruefen und benachrichtigen (mit Snooze)";
+    serviceConfig = {
+      Type = "oneshot";
+      ExecStart = "${nixos-update-check}";
+    };
+  };
+  systemd.user.timers.nixos-update-check = {
+    description = "Stuendlicher Check auf NixOS-Updates";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "hourly";
+      Persistent = true;            # verpasste Laeufe nach Aufwachen/Boot nachholen (= auch "beim Start")
+      RandomizedDelaySec = "10m";
+    };
+  };
+}
+NIXEOF
+
+cat > update-all.sh <<'SHEOF'
+#!/usr/bin/env bash
+# update-all.sh — nixpkgs bumpen + DIESEN Host neu bauen (Grundsystem-Variante, ohne VMs).
+# Wird vom Update-Icon und der Benachrichtigung aufgerufen (modules/host-updates.nix).
+set -euo pipefail
+cd "$(dirname "$0")"
+
+echo "==> nixpkgs aktualisieren (flake.lock)"
+nix flake update
+
+echo "==> Host neu bauen: $(hostname -s)"
+sudo nixos-rebuild switch --flake ".#$(hostname -s)"
+
+echo "==> flake.lock committen (falls geaendert)"
+git add flake.lock
+git diff --cached --quiet || git commit -m "flake.lock: nixpkgs bump $(date +%Y-%m-%d)"
+echo "Fertig."
+SHEOF
+chmod +x update-all.sh
+echo "  -> Update-Erinnerung + update-all.sh angelegt."
+fi
 
 cat > "hosts/$HOST/DETECTED-HARDWARE.txt" <<EOF
 # Automatisch erkannt am $(date -Iseconds) — Referenz fuer den spaeteren vfio-Schritt.
@@ -481,6 +684,41 @@ if [ "$DRY_RUN" = "1" ]; then
 fi
 
 # ===================== 5. disko + hardware-config + Passwoerter + Install =====================
+
+# Sicherheit vor dem Loeschen: alle Zielgeraete einsammeln (real aufgeloest + dedupliziert).
+TARGETS=()
+[ -n "${DISK:-}" ] && TARGETS+=("$(readlink -f "$DISK")")
+[ -n "${BYID:-}" ] && TARGETS+=("$(readlink -f "$BYID")")
+for _x in "${BYIDS[@]}";      do [ -n "$_x" ] && TARGETS+=("$(readlink -f "$_x")"); done
+for _x in "${DATA_BYIDS[@]}"; do [ -n "$_x" ] && TARGETS+=("$(readlink -f "$_x")"); done
+mapfile -t TARGETS < <(printf '%s\n' "${TARGETS[@]}" | awk 'NF && !seen[$0]++')
+
+# (1) Keine Ziel-Platte darf aktuell gemountet sein (sonst falsche/benutzte Platte).
+for _d in "${TARGETS[@]}"; do
+  _m="$(lsblk -nro MOUNTPOINT "$_d" 2>/dev/null | grep -v '^$' || true)"
+  [ -n "$_m" ] || continue
+  echo "FEHLER: Auf der Ziel-Platte $_d sind aktuell Dateisysteme gemountet:" >&2
+  printf '   %s\n' $_m >&2
+  if [ "${ALLOW_NONLIVE:-0}" = "1" ]; then
+    echo "WARN: ALLOW_NONLIVE=1 — fahre trotz Mounts fort (disko versucht auszuhaengen)." >&2
+  else
+    echo "        Bitte zuerst 'umount' oder vom ISO booten. (Override: ALLOW_NONLIVE=1)" >&2
+    exit 1
+  fi
+done
+
+# (2) Wurde der Live-Guard per Override umgangen: zusaetzliche GETIPPTE Bestaetigung der Hauptplatte.
+if [ "${NONLIVE:-0}" = "1" ]; then
+  _primary="$(readlink -f "${DISK:-${BYID:-}}" 2>/dev/null || true)"
+  [ -n "$_primary" ] || _primary="${TARGETS[0]:-}"
+  echo
+  echo "!!! ACHTUNG: Du umgehst die Live-System-Pruefung (ALLOW_NONLIVE=1)."
+  echo "!!! Folgende Platte(n) werden GLEICH UNWIDERRUFLICH GELOESCHT:"
+  printf '      %s\n' "${TARGETS[@]}"
+  read -rp "Zum Bestaetigen den EXAKTEN Pfad der Hauptplatte tippen ($_primary): " _confirm
+  [ "$_confirm" = "$_primary" ] || { echo "Eingabe stimmt nicht — Abbruch." >&2; exit 1; }
+fi
+
 echo "==> Platte wird partitioniert/verschluesselt (disko fragt nochmal + LUKS-Passphrase)."
 sudo nix --experimental-features "nix-command flakes" \
   run github:nix-community/disko/latest -- \
@@ -514,9 +752,40 @@ for _hf in "/mnt/persist/secrets/$USER_.hash" /mnt/persist/secrets/root.hash; do
   sudo test -s "$_hf" || { echo "FEHLER: $_hf ist leer - Abbruch (sonst kein Login moeglich)." >&2; exit 1; }
 done
 
+# ── RAM-Schonung fuer den Build (wichtig bei wenig Arbeitsspeicher, z.B. 8 GB) ──────
+# Das Live-ISO legt /tmp ins RAM (tmpfs) -> grosse Nix-Builds sprengen sonst den Speicher.
+MEM_GB=$(awk '/MemTotal/ {print int($2/1024/1024)}' /proc/meminfo)
+LOWMEM=0; [ "${MEM_GB:-99}" -lt 12 ] && LOWMEM=1
+
+# Build-Temp immer auf die frische Platte umlenken (raus aus dem RAM-tmpfs) - schadet nie.
+sudo mkdir -p /mnt/tmp
+export TMPDIR=/mnt/tmp
+
+# Temporaere Swap-Datei nur bei wenig RAM und wenn keiner aktiv ist (nach Installation entfernt).
+SWAPFILE=/mnt/installer-swap
+cleanup_swap() { sudo swapoff "$SWAPFILE" 2>/dev/null || true; sudo rm -f "$SWAPFILE" 2>/dev/null || true; }
+if [ "$LOWMEM" = "1" ] && [ "$(swapon --show --noheadings 2>/dev/null | wc -l)" -eq 0 ]; then
+  echo "==> Wenig RAM (${MEM_GB} GB): temporaere 8G-Swap-Datei anlegen ($SWAPFILE)."
+  if sudo fallocate -l 8G "$SWAPFILE" 2>/dev/null || sudo dd if=/dev/zero of="$SWAPFILE" bs=1M count=8192 status=none; then
+    sudo chmod 600 "$SWAPFILE"
+    sudo mkswap "$SWAPFILE" >/dev/null && sudo swapon "$SWAPFILE" && trap cleanup_swap EXIT
+  else
+    echo "WARN: Swap-Datei konnte nicht angelegt werden - fahre ohne fort." >&2
+  fi
+fi
+
+# Nix-Build-Optionen: bei wenig RAM auf 1 Job/1 Core drosseln (langsamer, aber speicherschonend).
+NIXOPTS="extra-experimental-features = nix-command flakes"
+if [ "$LOWMEM" = "1" ]; then
+  echo "==> Wenig RAM: Build wird auf max-jobs=1 / cores=1 gedrosselt (langsamer, dafuer stabil)."
+  NIXOPTS="$NIXOPTS
+max-jobs = 1
+cores = 1"
+fi
+
 git add -A
 git -c user.email=installer@localhost -c user.name=installer commit -q -m "Initiale Config ($HOST)" || true
-sudo env NIX_CONFIG="extra-experimental-features = nix-command flakes" \
+sudo env TMPDIR=/mnt/tmp NIX_CONFIG="$NIXOPTS" \
   nixos-install --flake ".#$HOST" --no-root-passwd
 
 # Generierte Config aufs installierte System uebernehmen (sonst nur im Live-System vorhanden)
