@@ -648,6 +648,9 @@ cat > update-all.sh <<'SHEOF'
 # update-all.sh — nixpkgs bumpen + DIESEN Host neu bauen (Grundsystem-Variante, ohne VMs).
 # Wird vom Update-Icon und der Benachrichtigung aufgerufen (modules/host-updates.nix).
 set -euo pipefail
+# setuid-sudo im PATH (der Notification-/User-Service-Kontext hat /run/wrappers/bin sonst nicht vorn,
+# sonst trifft sudo die nicht-setuid-Kopie unter /run/current-system/sw/bin -> "muss ... setuid").
+export PATH="/run/wrappers/bin:$PATH"
 cd "$(dirname "$0")"
 
 echo "==> nixpkgs aktualisieren (flake.lock)"
