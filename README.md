@@ -13,6 +13,7 @@ Es enthält keine persönlichen Daten und ist für beliebige Rechner geeignet.
 - KDE Plasma 6 (SDDM)
 - Deklarativer Benutzer; die Passwort-Hashes liegen auf `/persist`, nicht im Repo
 - **Optional**: Update-Erinnerung (Desktop-Icon + stündlicher Check auf neue nixpkgs-Stände, mit `update-all.sh` als Ein-Klick-Update)
+- **Optional**: Wird eine D3cold-fähige dedizierte GPU erkannt, kann sie auf Wunsch per vfio-pci gebunden werden. Im Leerlauf fällt sie dann in echtes **D3cold** (Slot stromlos) — auf Hybrid-Laptops spart das spürbar Strom, weil der Desktop ohnehin auf der iGPU läuft. Die dGPU steht danach nur noch für **VM-Passthrough** bereit, nicht mehr dem Host (kein CUDA/Host-Gaming).
 
 Das ist bewusst eine minimale First-Boot-Basis. Härtung, VMs, Secure Boot mit eigenen Schlüsseln usw. baust du anschließend auf dieser Grundlage auf.
 
@@ -46,9 +47,9 @@ Danach: Stick ziehen, `sudo reboot`.
 
 ## Was abgefragt bzw. erkannt wird
 
-**Abgefragt:** Hostname, Benutzername, Zeitzone, Locale, Tastaturlayout (einzeln wie `de`/`us`/`gb` oder Kombination wie `de,us` — umschaltbar mit Alt+Shift) und ob eine optionale **Update-Erinnerung** eingerichtet werden soll.
+**Abgefragt:** Hostname, Benutzername, Zeitzone, Locale, Tastaturlayout (einzeln wie `de`/`us`/`gb` oder Kombination wie `de,us` — umschaltbar mit Alt+Shift), ob eine optionale **Update-Erinnerung** eingerichtet werden soll und — nur falls eine D3cold-fähige dedizierte GPU gefunden wurde — ob diese per **vfio-pci** gebunden werden soll.
 
-**Automatisch erkannt:** alle internen Platten (USB-, Wechsel- und loop-Geräte werden ausgeblendet). Die stabile by-id wird in `disk.nix` gesetzt (nvme-eui/wwn bevorzugt). GPU- und WLAN-PCI-IDs landen zusätzlich in `hosts/<host>/DETECTED-HARDWARE.txt` als Referenz für spätere Schritte.
+**Automatisch erkannt:** alle internen Platten (USB-, Wechsel- und loop-Geräte werden ausgeblendet). Die stabile by-id wird in `disk.nix` gesetzt (nvme-eui/wwn bevorzugt). Außerdem sucht der Installer **vendor-unabhängig** nach einer dedizierten GPU, deren PCIe-Parent-Port eine ACPI-`_PR3`-Power-Resource hat (Bedingung für echtes D3cold) — die primäre Display-GPU (`boot_vga`) bleibt dabei stets ausgenommen. Wird eine solche dGPU gefunden, folgt die vfio-Abfrage oben; sonst erscheint sie gar nicht. Alle GPU- und WLAN-PCI-IDs landen zusätzlich in `hosts/<host>/DETECTED-HARDWARE.txt` als Referenz für spätere Schritte.
 
 Bei genau einer Platte wird sie als Default angeboten (Enter genügt). Bei mehreren erscheint ein Menü mit den Layout-Modi (siehe unten).
 
@@ -71,6 +72,7 @@ Bei Pool/Spiegel liegt ein LUKS über dem RAID → eine Passphrase; die ESP (`/b
 - Prüfe in der Zusammenfassung die Liste der Platten, die gelöscht werden (nicht den Installer-Stick!), bevor du `JA` tippst.
 - Nutze zuerst `--dry-run` und sieh dir die erzeugte Config an.
 - Im Repo liegen keine Geheimnisse — Passwort-Hashes werden zur Laufzeit erzeugt und nur auf `/persist` gespeichert.
+- Wählst du die vfio-Bindung, wird die dedizierte GPU dem **Host entzogen** (treiberlos an `vfio-pci` gebunden) — nutzbar dann nur per VM-Passthrough. Die Zusammenfassung zeigt das vor dem `JA` an; im Zweifel ablehnen, das Binding lässt sich später jederzeit in der Config nachrüsten. Ob `_PR3` im Live-ISO sichtbar ist, lässt sich vorab mit `--dry-run` prüfen.
 
 ## Erzeugte Struktur
 
@@ -79,7 +81,8 @@ Bei Pool/Spiegel liegt ein LUKS über dem RAID → eine Passphrase; die ESP (`/b
 ├── flake.nix
 ├── modules/
 │   ├── desktop.nix                # geteilter Desktop-/Basis-Stack (Boot, Netz, Locale, KDE)
-│   └── host-updates.nix           # nur mit Update-Erinnerung: Icon + stündlicher Notify-Timer
+│   ├── host-updates.nix           # nur mit Update-Erinnerung: Icon + stündlicher Notify-Timer
+│   └── vfio.nix                   # nur mit vfio-Bindung: dGPU an vfio-pci (mischbares Passthrough-Modul)
 ├── update-all.sh                  # nur mit Update-Erinnerung: flake.lock bumpen + Rebuild
 └── hosts/<host>/
     ├── disk.nix                   # disko: GPT + LUKS2 + btrfs (je nach Platten-Modus)
@@ -88,7 +91,7 @@ Bei Pool/Spiegel liegt ein LUKS über dem RAID → eine Passphrase; die ESP (`/b
     └── DETECTED-HARDWARE.txt      # GPU/WLAN-IDs als Referenz (nicht aktiv)
 ```
 
-Der geteilte Stack (Boot, Netzwerk, Locale, Tastatur, KDE, Basis-Pakete) liegt in `modules/desktop.nix`; die regionalen Werte (Zeitzone/Locale/Tastatur) sind dort aus den Abfragen fixiert. Die `hosts/<host>/configuration.nix` importiert dieses Modul und setzt nur das Maschinenspezifische (Hostname, Benutzer). So lassen sich später weitere Hosts anlegen, die denselben Desktop-Stack teilen.
+Der geteilte Stack (Boot, Netzwerk, Locale, Tastatur, KDE, Basis-Pakete) liegt in `modules/desktop.nix`; die regionalen Werte (Zeitzone/Locale/Tastatur) sind dort aus den Abfragen fixiert. Die `hosts/<host>/configuration.nix` importiert dieses Modul und setzt nur das Maschinenspezifische (Hostname, Benutzer, ggf. die `host.passthroughIds` der dGPU). So lassen sich später weitere Hosts anlegen, die denselben Desktop-Stack teilen. Das `modules/vfio.nix` ist generisch und mischbar — spätere VMs können eigene Geräte-IDs beitragen.
 
 ## Weiterverwenden
 
@@ -99,7 +102,9 @@ cd ~/nixos-config
 sudo nixos-rebuild switch --flake .#<host>
 ```
 
-Hast du die Update-Erinnerung gewählt, gibt es zusätzlich ein Desktop-Icon „NixOS aktualisieren" und `update-all.sh` (bumpt `flake.lock` und baut den Host neu) — ein stündlicher Timer meldet, wenn der nixpkgs-Kanal weitergewandert ist.
+Hast du die Update-Erinnerung gewählt, gibt es zusätzlich ein Desktop-Icon „NixOS aktualisieren" und `update-all.sh` (bumpt `flake.lock` und baut den Host neu) — ein stündlicher Timer meldet, wenn der nixpkgs-Kanal weitergewandert ist. Der Timer vergleicht dabei den **laufenden** Systemstand (`nixos-version`) mit dem Upstream, und `update-all.sh` verwirft einen `flake.lock`-Bump wieder, falls ein Update abgebrochen wird — so bleibt die Erinnerung auch nach einem unterbrochenen Lauf zuverlässig.
+
+Hast du die vfio-Bindung gewählt, greift sie nach dem **nächsten Reboot** (Kernel-Parameter); danach hängt die dGPU an `vfio-pci` und fällt im Leerlauf in D3cold. Prüfen mit `lspci -nnk -d <vendor:device>` (erwartet: `Kernel driver in use: vfio-pci`).
 
 Zum Sichern/Versionieren ein eigenes (separates, ggf. privates) Remote hinzufügen und pushen:
 
