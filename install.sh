@@ -87,6 +87,31 @@ if [ "$DRY_RUN" != "1" ]; then
   esac
 fi
 
+# ===================== 0c. dGPU fuer D3cold erkennen (vendor-unabhaengig ueber _PR3) =====================
+# Eine dedizierte GPU faellt nur dann per vfio-pci in echtes D3cold (Slot stromlos), wenn ihr
+# PCIe-Parent-Port eine ACPI-_PR3-Power-Resource hat. Genau danach suchen wir -> trifft die
+# D3cold-faehige dGPU treffsicher, ohne nach Hersteller zu raten (im Live-ISO sind ACPI + sysfs da).
+# Ergebnis: DGPU_GPU_ID / DGPU_AUDIO_ID / DGPU_VENDOR / DGPU_ADDR (leer, wenn nichts Passendes da).
+DGPU_GPU_ID=""; DGPU_AUDIO_ID=""; DGPU_VENDOR=""; DGPU_ADDR=""
+for _gpu in $(lspci -Dn 2>/dev/null | awk '$2 ~ /^030[02]/ {print $1}'); do
+  # Die primaere Display-GPU (boot_vga=1, i.d.R. die iGPU) NIEMALS anfassen -> sonst Desktop tot.
+  [ "$(cat "/sys/bus/pci/devices/$_gpu/boot_vga" 2>/dev/null || echo 0)" = "1" ] && continue
+  # Parent-Port ermitteln und absichern, dass es wirklich ein PCI-Device ist (kein "."-Artefakt).
+  _par="$(basename "$(dirname "$(readlink -f "/sys/bus/pci/devices/$_gpu" 2>/dev/null)")" 2>/dev/null)"
+  [ -n "$_par" ] && [ -d "/sys/bus/pci/devices/$_par" ] || continue
+  # _PR3 am Parent-Port (sysfs-Name: power_resources_D3hot) = D3cold ueber die Plattform moeglich.
+  if [ -e "/sys/bus/pci/devices/$_par/firmware_node/power_resources_D3hot" ]; then
+    DGPU_ADDR="$_gpu"
+    DGPU_GPU_ID="$(lspci -Dn -s "$_gpu" | awk '{print $3}')"     # vendor:device der GPU-Funktion
+    DGPU_VENDOR="${DGPU_GPU_ID%%:*}"
+    _bd="${_gpu%.*}"                                             # Bus:Device ohne .Funktion
+    # Audio-Funktion an derselben Bus:Device-Adresse (Klasse 0403) -> muss mit durchgereicht werden,
+    # sonst haelt sie den Slot ueber D3hot fest.
+    DGPU_AUDIO_ID="$(lspci -Dn 2>/dev/null | awk -v bd="$_bd" 'index($1, bd".")==1 && $2 ~ /^0403/ {print $3; exit}')"
+    break
+  fi
+done
+
 # ===================== 1. Abfragen =====================
 read -rp "Hostname [nixos]: " HOST;      HOST="${HOST:-nixos}"
 read -rp "Benutzername [user]: " USER_;  USER_="${USER_:-user}"
@@ -114,6 +139,18 @@ esac
 echo
 read -rp "Update-Erinnerung installieren? (Desktop-Icon + stuendlicher Update-Check) [j/N]: " HU
 case "$HU" in [jJyY]*) HOSTUPDATES=1 ;; *) HOSTUPDATES=0 ;; esac
+
+# Optional: dGPU an vfio-pci binden fuer D3cold-Stromsparen — nur wenn oben eine D3cold-faehige
+# dGPU erkannt wurde (sonst erscheint die Frage gar nicht).
+VFIO_D3COLD=0
+if [ -n "$DGPU_GPU_ID" ]; then
+  echo
+  echo "Dedizierte GPU erkannt: $DGPU_ADDR  ($DGPU_GPU_ID${DGPU_AUDIO_ID:+ + Audio $DGPU_AUDIO_ID})  — D3cold-faehig (_PR3 am Parent-Port)."
+  echo "An vfio-pci binden spart im Leerlauf Strom (Slot wird stromlos), macht die GPU aber fuer den"
+  echo "HOST unbrauchbar (kein CUDA, kein Host-Gaming — nur Passthrough an eine VM)."
+  read -rp "dGPU an vfio-pci binden? [j/N]: " VF
+  case "$VF" in [jJyY]*) VFIO_D3COLD=1 ;; *) VFIO_D3COLD=0 ;; esac
+fi
 
 # ===================== 2. Zielplatte erkennen =====================
 echo
@@ -266,6 +303,11 @@ REPORT_NET="$(lspci -nn | grep -Ei 'network|wireless' || true)"
 
 # ===================== 3. Zusammenfassung + Bestaetigung =====================
 case "$XKB" in *,*) MULTI="ja (Alt+Shift)" ;; *) MULTI="nein" ;; esac
+if [ "$VFIO_D3COLD" = "1" ]; then
+  VFIO_DESC="ja -> $DGPU_GPU_ID${DGPU_AUDIO_ID:+ + $DGPU_AUDIO_ID}  (GPU wird dem HOST entzogen)"
+else
+  VFIO_DESC="nein"
+fi
 cat <<SUMMARY
 
 ==================== Zusammenfassung ====================
@@ -275,6 +317,7 @@ cat <<SUMMARY
   Locale     : $LOC
   Tastatur   : $XKB    (mehrere Layouts: $MULTI)
   Layout     : $MODE_DESC
+  dGPU->vfio : $VFIO_DESC
   Platten    : (werden VOLLSTAENDIG GELOESCHT)
 $DISKS_DESC
   Aktion     : $( [ "$DRY_RUN" = "1" ] && echo "DRY_RUN (nur Dateien)" || echo "ECHT (installiert)" )
@@ -501,6 +544,30 @@ if [ "$HOSTUPDATES" = "1" ]; then
   IMPORTS="$IMPORTS
     ../../modules/host-updates.nix"
 fi
+if [ "$VFIO_D3COLD" = "1" ]; then
+  IMPORTS="$IMPORTS
+    ../../modules/vfio.nix"
+fi
+
+# vfio-Eintraege fuer die Host-Config (nur bei VFIO_D3COLD=1; sonst leer): host.passthroughIds +
+# passthroughUser (-> User in die libvirtd-Gruppe) + Vendor-Blacklist als Fallback.
+VFIO_CONFIG=""
+if [ "$VFIO_D3COLD" = "1" ]; then
+  _ids="\"$DGPU_GPU_ID\""
+  [ -n "$DGPU_AUDIO_ID" ] && _ids="$_ids \"$DGPU_AUDIO_ID\""
+  case "$DGPU_VENDOR" in
+    10de) _bl='[ "nouveau" "nvidiafb" ]' ;;   # NVIDIA
+    1002) _bl='[ "amdgpu" "radeon" ]' ;;      # AMD
+    *)    _bl="" ;;
+  esac
+  VFIO_CONFIG="
+  # dGPU an vfio-pci binden -> im Leerlauf D3cold (Slot stromlos), erkannt ueber _PR3 am Parent-Port.
+  # Macht die GPU fuer den Host unbrauchbar (nur VM-Passthrough). Geteiltes Modul: modules/vfio.nix.
+  host.passthroughIds  = [ $_ids ];
+  host.passthroughUser = \"$USER_\";"
+  [ -n "$_bl" ] && VFIO_CONFIG="$VFIO_CONFIG
+  boot.blacklistedKernelModules = $_bl;   # Fallback: bleibt treiberlos, falls vfio-pci nicht greift"
+fi
 cat > "hosts/$HOST/configuration.nix" <<EOF
 { ... }:
 {
@@ -509,7 +576,7 @@ $IMPORTS
   ];
 
   networking.hostName = "$HOST";
-
+$VFIO_CONFIG
   users.users.$USER_ = {
     isNormalUser = true;
     description = "$USER_";
@@ -565,10 +632,19 @@ let
       if [ "$deadline" -gt "$now" ] 2>/dev/null; then exit 0; fi
     fi
 
-    # Gepinnten nixpkgs-Branch + Revision aus flake.lock lesen (robust ueber den root-Input).
+    # Gepinnten nixpkgs-Branch aus flake.lock lesen (robust ueber den root-Input). Der Branch
+    # aendert sich durch einen Bump nicht -> bleibt die richtige Quelle fuer den ls-remote unten.
     node=$(jq -r '.nodes.root.inputs.nixpkgs // "nixpkgs"' "$LOCK")
     ref=$(jq -r --arg n "$node" '.nodes[$n].original.ref // "nixos-26.05"' "$LOCK")
-    localrev=$(jq -r --arg n "$node" '.nodes[$n].locked.rev // ""' "$LOCK")
+
+    # Vergleichsbasis ist der Stand des LAUFENDEN Systems (nixos-version), NICHT flake.lock auf der
+    # Platte: ein halbfertiger 'nix flake update' (flake.lock gebumpt, aber Host noch nicht gebaut)
+    # wuerde sonst faelschlich als "kein Update" gewertet -> die Erinnerung verstummt dauerhaft.
+    # nixpkgsRevision = die nixpkgs-Revision, mit der der laufende Host gebaut wurde.
+    localrev=$(nixos-version --json 2>/dev/null | jq -r '.nixpkgsRevision // ""')
+    # Fallback nur, wenn nixos-version keine Revision liefert (z. B. dirty build): flake.lock auf
+    # der Platte. Den verwaisten-Bump-Fall faengt dann update-all.sh per Rollback ab (Kombi-Loesung).
+    [ -n "$localrev" ] || localrev=$(jq -r --arg n "$node" '.nodes[$n].locked.rev // ""' "$LOCK")
     [ -n "$localrev" ] || exit 0
 
     # Upstream-HEAD des Branches (leichtgewichtig; offline/Fehler/Timeout -> still raus).
@@ -653,11 +729,25 @@ set -euo pipefail
 export PATH="/run/wrappers/bin:$PATH"
 cd "$(dirname "$0")"
 
+# Verwaister-Bump-Schutz: 'nix flake update' bumpt flake.lock VOR dem rebuild, der commit kommt
+# danach. Bricht es dazwischen ab (Strg-C, rebuild-Fehler, Fenster zu), den Bump verwerfen -> kein
+# gebumptes-aber-nicht-gebautes flake.lock (sonst meldet der Update-Check faelschlich "aktuell").
+REPO_ROOT="$PWD"; FLAKE_BUMPED=0; BUILD_DONE=0
+cleanup() {
+  if [ "$FLAKE_BUMPED" -eq 1 ] && [ "$BUILD_DONE" -eq 0 ]; then
+    git -C "$REPO_ROOT" checkout -- flake.lock 2>/dev/null \
+      && echo "Abbruch vor Abschluss -> flake.lock-Bump verworfen (Stand unveraendert)."
+  fi
+}
+trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
+
 echo "==> nixpkgs aktualisieren (flake.lock)"
 nix flake update
+FLAKE_BUMPED=1
 
 echo "==> Host neu bauen: $(hostname -s)"
 sudo nixos-rebuild switch --flake ".#$(hostname -s)"
+BUILD_DONE=1
 
 echo "==> flake.lock committen (falls geaendert)"
 git add flake.lock
@@ -666,6 +756,59 @@ echo "Fertig."
 SHEOF
 chmod +x update-all.sh
 echo "  -> Update-Erinnerung + update-all.sh angelegt."
+fi
+
+# ── Optional: geteiltes vfio-Modul (dGPU-Passthrough -> D3cold im Leerlauf) ──────────────────────
+# Nur wenn oben eine D3cold-faehige dGPU erkannt UND bestaetigt wurde. host.passthroughIds/-User
+# stehen bereits in der Host-Config (VFIO_CONFIG oben); hier kommt das Modul dazu, das daraus die
+# Bindung baut. Generisch & mischbar -> spaetere VMs koennen weitere IDs beitragen.
+if [ "$VFIO_D3COLD" = "1" ]; then
+cat > modules/vfio.nix <<'NIXEOF'
+# modules/vfio.nix — geteiltes Passthrough-Modul (AUTO-GENERIERT, danach frei editierbar).
+# Jede VM, die ein PCI-Geraet durchreicht, traegt nur ihre IDs zu host.passthroughIds bei
+# (Listen mergen in NixOS automatisch). Daraus baut dieses Modul EINE vfio-pci-Bindung +
+# IOMMU + libvirt. Aktiv nach 'nixos-rebuild switch' + REBOOT (Kernel-Parameter).
+{ config, lib, ... }:
+let
+  cfg = config.host;
+in
+{
+  options.host.passthroughIds = lib.mkOption {
+    type = lib.types.listOf lib.types.str;
+    default = [ ];
+    example = [ "10de:25a9" "8086:7e40" ];
+    description = "PCI vendor:device-IDs, die an vfio-pci gebunden werden (VM-Passthrough).";
+  };
+
+  options.host.passthroughUser = lib.mkOption {
+    type = lib.types.str;
+    default = "";
+    example = "alice";
+    description = "Optionaler Benutzer, der fuer sudo-loses virsh in die libvirtd-Gruppe kommt.";
+  };
+
+  config = lib.mkIf (cfg.passthroughIds != [ ]) (lib.mkMerge [
+    {
+      # intel_iommu/amd_iommu sind je auf der anderen Plattform ein No-op -> beide unbedingt
+      # setzbar, keine CPU-Erkennung noetig.
+      boot.kernelParams = [
+        "intel_iommu=on"
+        "amd_iommu=on"
+        "iommu=pt"
+        "vfio-pci.ids=${lib.concatStringsSep "," (lib.unique cfg.passthroughIds)}"
+      ];
+      # vfio frueh laden, damit das Binding VOR den normalen Treibern greift.
+      boot.initrd.kernelModules = [ "vfio_pci" "vfio_iommu_type1" "vfio" ];
+      # libvirt/KVM, um die durchgereichten Geraete in VMs zu nutzen.
+      virtualisation.libvirtd.enable = true;
+    }
+    (lib.mkIf (cfg.passthroughUser != "") {
+      users.users.${cfg.passthroughUser}.extraGroups = [ "libvirtd" ];
+    })
+  ]);
+}
+NIXEOF
+echo "  -> modules/vfio.nix angelegt (dGPU an vfio-pci -> D3cold im Leerlauf)."
 fi
 
 cat > "hosts/$HOST/DETECTED-HARDWARE.txt" <<EOF
