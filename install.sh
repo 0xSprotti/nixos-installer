@@ -154,14 +154,16 @@ fi
 
 # ===================== 2. Zielplatte erkennen =====================
 echo
-echo "Verfuegbare Datenträger (USB ausgeblendet):"
-lsblk -dpno NAME,SIZE,MODEL,TRAN | grep -viE 'usb|loop' || true
+echo "Verfuegbare Datenträger (USB/zram ausgeblendet):"
+lsblk -dpno NAME,SIZE,MODEL,TRAN | grep -viE 'usb|loop|zram' || true
 echo "  (Falls deine Platte fehlt: in anderem Terminal 'lsblk' pruefen.)"
 # Interne Platten als Auswahl-Kandidaten sammeln:
-# TYPE=disk (also kein loop), nicht USB, nicht wechselbar.
+# TYPE=disk (also kein loop/crypt), nicht USB, nicht wechselbar, kein zram.
+# zram (RAM-Swap) hat TYPE=disk und wuerde sonst als zweite "Platte" auftauchen.
 DISK_CANDS=()
 while read -r _name; do
   [ -n "$_name" ] || continue
+  case "$_name" in */zram*) continue ;; esac   # zram (RAM-Swap) ist nie ein Installationsziel
   if [ "$(lsblk -dno TYPE "$_name" 2>/dev/null)" != "disk" ]; then continue; fi
   if [ "$(lsblk -dno TRAN "$_name" 2>/dev/null)" = "usb" ]; then continue; fi
   if [ "$(lsblk -dno RM   "$_name" 2>/dev/null)" = "1" ]; then continue; fi
