@@ -12,10 +12,11 @@ Es enthält keine persönlichen Daten und ist für beliebige Rechner geeignet.
 - systemd-boot (UEFI), systemd-Stage-1-initrd, LTS-Kernel
 - KDE Plasma 6 (SDDM)
 - Deklarativer Benutzer; die Passwort-Hashes liegen auf `/persist`, nicht im Repo
-- **Optional**: Update-Erinnerung (Desktop-Icon + stündlicher Check auf neue nixpkgs-Stände, mit `update-all.sh` als Ein-Klick-Update)
+- **Optional**: Update-Erinnerung — Desktop-Icon + stündlicher Check auf neue nixpkgs-Stände (zurückstellbar um 1 h / 8 h / bis morgen), dazu `update-all.sh` als Ein-Klick-Update mit Paket-Diff (`nvd`), Session-Log, Smoke-Checks und Firmware/BIOS-Updates via fwupd (LVFS)
 - **Optional**: Wird eine D3cold-fähige dedizierte GPU erkannt, kann sie auf Wunsch per vfio-pci gebunden werden. Im Leerlauf fällt sie dann in echtes **D3cold** (Slot stromlos) — auf Hybrid-Laptops spart das spürbar Strom, weil der Desktop ohnehin auf der iGPU läuft. Die dGPU steht danach nur noch für **VM-Passthrough** bereit, nicht mehr dem Host (kein CUDA/Host-Gaming).
+- **Optional**: Host-Härtung nach **BSI IT-Grundschutz SYS.2.3** (Standard: Ja) — AppArmor, sysctl-Kernel-Härtung, `noexec/nosuid/nodev` für Wechselmedien, GC-/Log-Deckel und **USBGuard** mit einer aus dem Live-System erzeugten Geräte-Whitelist (alles andere wird geblockt, aktiv ab dem ersten Boot). Schlägt die Whitelist-Erzeugung fehl (z. B. offline), bleibt das Härtungsmodul installiert und nur USBGuard aus — nachrüstbar per `usbguard-sync.sh --init` aus dem Referenz-Repo.
 
-Das ist bewusst eine minimale First-Boot-Basis. Härtung, VMs, Secure Boot mit eigenen Schlüsseln usw. baust du anschließend auf dieser Grundlage auf.
+Das ist bewusst eine minimale First-Boot-Basis (auf Wunsch bereits SYS.2.3-gehärtet). VMs, Secure Boot mit eigenen Schlüsseln usw. baust du anschließend auf dieser Grundlage auf.
 
 ## Voraussetzungen
 
@@ -47,7 +48,7 @@ Danach: Stick ziehen, `sudo reboot`.
 
 ## Was abgefragt bzw. erkannt wird
 
-**Abgefragt:** Hostname, Benutzername, Zeitzone, Locale, Tastaturlayout (einzeln wie `de`/`us`/`gb` oder Kombination wie `de,us` — umschaltbar mit Alt+Shift), ob eine optionale **Update-Erinnerung** eingerichtet werden soll und — nur falls eine D3cold-fähige dedizierte GPU gefunden wurde — ob diese per **vfio-pci** gebunden werden soll.
+**Abgefragt:** Hostname, Benutzername, Zeitzone, Locale, Tastaturlayout (einzeln wie `de`/`us`/`gb` oder Kombination wie `de,us` — umschaltbar mit Alt+Shift), ob eine optionale **Update-Erinnerung** eingerichtet werden soll (Standard: Ja — Enter genügt), ob die **Host-Härtung nach SYS.2.3** eingerichtet werden soll (Standard: Ja — Enter genügt) und — nur falls eine D3cold-fähige dedizierte GPU gefunden wurde — ob diese per **vfio-pci** gebunden werden soll.
 
 **Automatisch erkannt:** alle internen Platten (USB-, Wechsel- und loop-Geräte werden ausgeblendet). Die stabile by-id wird in `disk.nix` gesetzt (nvme-eui/wwn bevorzugt). Außerdem sucht der Installer **vendor-unabhängig** nach einer dedizierten GPU, deren PCIe-Parent-Port eine ACPI-`_PR3`-Power-Resource hat (Bedingung für echtes D3cold) — die primäre Display-GPU (`boot_vga`) bleibt dabei stets ausgenommen. Wird eine solche dGPU gefunden, folgt die vfio-Abfrage oben; sonst erscheint sie gar nicht. Alle GPU- und WLAN-PCI-IDs landen zusätzlich in `hosts/<host>/DETECTED-HARDWARE.txt` als Referenz für spätere Schritte.
 
@@ -81,12 +82,14 @@ Bei Pool/Spiegel liegt ein LUKS über dem RAID → eine Passphrase; die ESP (`/b
 ├── flake.nix
 ├── modules/
 │   ├── desktop.nix                # geteilter Desktop-/Basis-Stack (Boot, Netz, Locale, KDE)
-│   ├── host-updates.nix           # nur mit Update-Erinnerung: Icon + stündlicher Notify-Timer
+│   ├── host-updates.nix           # nur mit Update-Erinnerung: Icon + Notify-Timer (Snooze via systemd) + fwupd/LVFS
+│   ├── hardening.nix              # nur mit Härtung: SYS.2.3 (AppArmor, USBGuard, sysctl, udisks2-noexec, GC-Deckel)
 │   └── vfio.nix                   # nur mit vfio-Bindung: dGPU an vfio-pci (mischbares Passthrough-Modul)
-├── update-all.sh                  # nur mit Update-Erinnerung: flake.lock bumpen + Rebuild
+├── update-all.sh                  # nur mit Update-Erinnerung: Ein-Klick-Update (Flake → Diff → Host → Firmware)
 └── hosts/<host>/
     ├── disk.nix                   # disko: GPT + LUKS2 + btrfs (je nach Platten-Modus)
     ├── configuration.nix          # schlank: importiert modules/, setzt Hostname + Benutzer
+    ├── usbguard-rules.conf        # nur mit Härtung: gepinnte USBGuard-Whitelist (aus dem Live-System erzeugt)
     ├── hardware-configuration.nix # live erzeugt
     └── DETECTED-HARDWARE.txt      # GPU/WLAN-IDs als Referenz (nicht aktiv)
 ```
@@ -102,9 +105,23 @@ cd ~/nixos-config
 sudo nixos-rebuild switch --flake .#<host>
 ```
 
-Hast du die Update-Erinnerung gewählt, gibt es zusätzlich ein Desktop-Icon „NixOS aktualisieren" und `update-all.sh` (bumpt `flake.lock` und baut den Host neu) — ein stündlicher Timer meldet, wenn der nixpkgs-Kanal weitergewandert ist. Der Timer vergleicht dabei den **laufenden** Systemstand (`nixos-version`) mit dem Upstream, und `update-all.sh` verwirft einen `flake.lock`-Bump wieder, falls ein Update abgebrochen wird — so bleibt die Erinnerung auch nach einem unterbrochenen Lauf zuverlässig.
+Hast du die Update-Erinnerung gewählt, gibt es zusätzlich ein Desktop-Icon „NixOS aktualisieren" und `update-all.sh`:
+
+```bash
+bash update-all.sh              # Flake bumpen → Diff zeigen → Host aktivieren → Firmware
+bash update-all.sh --host-only  # nur Flake + Host (keine VMs, keine Firmware → kein Reboot-Risiko)
+bash update-all.sh --dry-run    # nur zeigen, was passieren würde; einziger Modus ohne TTY
+```
+
+Das Skript baut den neuen Stand erst **ohne Aktivierung**, zeigt den Paket-Diff (`nvd`) und fragt dann. Bei „n" oder Fehler wird der `flake.lock`-Bump verworfen — Repo und laufendes System bleiben deckungsgleich, und die stündliche Erinnerung (Vergleich: laufender Stand via `nixos-version` gegen Upstream) bleibt auch nach einem unterbrochenen Lauf zuverlässig. Erinnerungen lassen sich um 1 h / 8 h / bis morgen zurückstellen — als reine systemd-Timer übersteht das auch Suspend.
+
+Nach der Aktivierung laufen **Smoke-Checks**: der systemd-Zustand wird geprüft, und eigene `check-*.sh` im Repo-Root werden automatisch mit ausgeführt — sie warnen nur und brechen nie ab. Der `flake.lock`-Commit trägt den Paket-Diff im Body: `git log -- flake.lock` wird so zur Update-Chronik. Jeder Lauf (außer `--dry-run`) landet komplett in einem Session-Log unter `~/.local/state/update-all/` (die letzten 20 bleiben liegen). Legst du später eigene `deploy-*-vm.sh` an, nimmt das Skript auch sie automatisch mit.
+
+> ⚠️ **Firmware/BIOS:** Zum Schluss prüft `update-all.sh` via fwupd (LVFS) auf Firmware-Updates — mit eigenem `[j/N]`-Gate, denn ein bestätigtes BIOS-Update **rebootet sofort**. Mit `--host-only` bleibt dieser Teil komplett außen vor.
 
 Hast du die vfio-Bindung gewählt, greift sie nach dem **nächsten Reboot** (Kernel-Parameter); danach hängt die dGPU an `vfio-pci` und fällt im Leerlauf in D3cold. Prüfen mit `lspci -nnk -d <vendor:device>` (erwartet: `Kernel driver in use: vfio-pci`).
+
+Hast du die Härtung gewählt, ist sie ab dem ersten Boot aktiv. Kurz-Verifikation: `usbguard list-devices --blocked` muss **leer** sein (sonst wurde ein internes Gerät nicht erfasst — Regel nachziehen), `sudo aa-status` zeigt geladene AppArmor-Profile, und ein gemounteter USB-Stick trägt `noexec` (`findmnt /run/media/$USER/*`). Neue USB-Geräte werden per Default **geblockt** und am Desktop gemeldet; dauerhaft erlauben über die versionierte Whitelist `hosts/<host>/usbguard-rules.conf` (Workflow und Details: `usbguard-sync.sh` und `README-hardening.md` im Referenz-Repo). Meldet der Installer, dass die Whitelist nicht erzeugt werden konnte, ist USBGuard aus — nachrüsten mit `bash usbguard-sync.sh --init` und anschließendem Rebuild.
 
 Zum Sichern/Versionieren ein eigenes (separates, ggf. privates) Remote hinzufügen und pushen:
 
