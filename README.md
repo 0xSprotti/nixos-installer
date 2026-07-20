@@ -14,7 +14,7 @@ Es enthält keine persönlichen Daten und ist für beliebige Rechner geeignet.
 - Deklarativer Benutzer; die Passwort-Hashes liegen auf `/persist`, nicht im Repo
 - **Optional**: Update-Erinnerung — Desktop-Icon + stündlicher Check auf neue nixpkgs-Stände (zurückstellbar um 1 h / 8 h / bis morgen), dazu `update-all.sh` als Ein-Klick-Update mit Paket-Diff (`nvd`), Session-Log, Smoke-Checks und Firmware/BIOS-Updates via fwupd (LVFS)
 - **Optional**: Wird eine D3cold-fähige dedizierte GPU erkannt, kann sie auf Wunsch per vfio-pci gebunden werden. Im Leerlauf fällt sie dann in echtes **D3cold** (Slot stromlos) — auf Hybrid-Laptops spart das spürbar Strom, weil der Desktop ohnehin auf der iGPU läuft. Die dGPU steht danach nur noch für **VM-Passthrough** bereit, nicht mehr dem Host (kein CUDA/Host-Gaming).
-- **Optional**: Host-Härtung nach **BSI IT-Grundschutz SYS.2.3** (Standard: Ja) — AppArmor, sysctl-Kernel-Härtung, `noexec/nosuid/nodev` für Wechselmedien, GC-/Log-Deckel und **USBGuard** mit einer aus dem Live-System erzeugten Geräte-Whitelist (alles andere wird geblockt, aktiv ab dem ersten Boot). Schlägt die Whitelist-Erzeugung fehl (z. B. offline), bleibt das Härtungsmodul installiert und nur USBGuard aus — nachrüstbar per `usbguard-sync.sh --init` aus dem Referenz-Repo.
+- **Optional**: Host-Härtung nach **BSI IT-Grundschutz SYS.2.3** (Standard: Ja) — AppArmor-LSM, **systemd-Dienst-Härtung** (Maskierung der ungenutzten libvirt-Treiber-Daemons für LXC/VirtualBox/Xen samt Sockets; Sandbox für acpid, sofern vorhanden), sysctl-Kernel-Härtung, `noexec/nosuid/nodev` für Wechselmedien, GC-/Log-Deckel und **USBGuard** mit einer aus dem Live-System erzeugten Geräte-Whitelist (alles andere wird geblockt, aktiv ab dem ersten Boot). Schlägt die Whitelist-Erzeugung fehl (z. B. offline), bleibt das Härtungsmodul installiert und nur USBGuard aus — nachrüstbar per `usbguard-sync.sh --init` aus dem Referenz-Repo.
 
 Das ist bewusst eine minimale First-Boot-Basis (auf Wunsch bereits SYS.2.3-gehärtet). VMs, Secure Boot mit eigenen Schlüsseln usw. baust du anschließend auf dieser Grundlage auf.
 
@@ -48,9 +48,7 @@ Danach: Stick ziehen, `sudo reboot`.
 
 ## Was abgefragt bzw. erkannt wird
 
-**Abgefragt:** Hostname, Benutzername, Zeitzone, Locale (Menü: `de_DE.UTF-8` / `en_US.UTF-8` / `en_GB.UTF-8` oder „eigene" im glibc-Format `sprache_LAND.UTF-8[@modifier]`), Tastaturlayout (einzeln wie `de`/`us`/`gb` oder Kombination wie `de,us` — umschaltbar mit Alt+Shift), ob eine optionale **Update-Erinnerung** eingerichtet werden soll (Standard: Ja — Enter genügt), ob die **Host-Härtung nach SYS.2.3** eingerichtet werden soll (Standard: Ja — Enter genügt) und — nur falls eine D3cold-fähige dedizierte GPU gefunden wurde — ob diese per **vfio-pci** gebunden werden soll.
-
-**Alle Eingaben werden sofort validiert** und bei Fehleingabe erneut abgefragt: Hostname (RFC-1123-Label, 1–63 Zeichen), Benutzername (POSIX-portabel, max. 32 Zeichen, nicht `root`), Zeitzone (gegen die tzdata bzw. `timedatectl list-timezones`), Locale und xkb-Codes per Format-Check. Hintergrund: ein ungültiger Wert (Praxisfall: „1" als Locale) würde sonst erst spät im Build mit `unsupported locales detected` abbrechen — siehe `troubleshooting.md`, Sektion A.
+**Abgefragt:** Hostname, Benutzername, Zeitzone, Locale, Tastaturlayout (einzeln wie `de`/`us`/`gb` oder Kombination wie `de,us` — umschaltbar mit Alt+Shift), ob eine optionale **Update-Erinnerung** eingerichtet werden soll (Standard: Ja — Enter genügt), ob die **Host-Härtung nach SYS.2.3** eingerichtet werden soll (Standard: Ja — Enter genügt) und — nur falls eine D3cold-fähige dedizierte GPU gefunden wurde — ob diese per **vfio-pci** gebunden werden soll.
 
 **Automatisch erkannt:** alle internen Platten (USB-, Wechsel- und loop-Geräte werden ausgeblendet). Die stabile by-id wird in `disk.nix` gesetzt (nvme-eui/wwn bevorzugt). Außerdem sucht der Installer **vendor-unabhängig** nach einer dedizierten GPU, deren PCIe-Parent-Port eine ACPI-`_PR3`-Power-Resource hat (Bedingung für echtes D3cold) — die primäre Display-GPU (`boot_vga`) bleibt dabei stets ausgenommen. Wird eine solche dGPU gefunden, folgt die vfio-Abfrage oben; sonst erscheint sie gar nicht. Alle GPU- und WLAN-PCI-IDs landen zusätzlich in `hosts/<host>/DETECTED-HARDWARE.txt` als Referenz für spätere Schritte.
 
@@ -85,7 +83,7 @@ Bei Pool/Spiegel liegt ein LUKS über dem RAID → eine Passphrase; die ESP (`/b
 ├── modules/
 │   ├── desktop.nix                # geteilter Desktop-/Basis-Stack (Boot, Netz, Locale, KDE)
 │   ├── host-updates.nix           # nur mit Update-Erinnerung: Icon + Notify-Timer (Snooze via systemd) + fwupd/LVFS
-│   ├── hardening.nix              # nur mit Härtung: SYS.2.3 (AppArmor, USBGuard, sysctl, udisks2-noexec, GC-Deckel)
+│   ├── hardening.nix              # nur mit Härtung: SYS.2.3 (AppArmor-LSM, Dienst-Härtung, USBGuard, sysctl, GC-Deckel)
 │   └── vfio.nix                   # nur mit vfio-Bindung: dGPU an vfio-pci (mischbares Passthrough-Modul)
 ├── update-all.sh                  # nur mit Update-Erinnerung: Ein-Klick-Update (Flake → Diff → Host → Firmware)
 └── hosts/<host>/
@@ -123,7 +121,7 @@ Nach der Aktivierung laufen **Smoke-Checks**: der systemd-Zustand wird geprüft,
 
 Hast du die vfio-Bindung gewählt, greift sie nach dem **nächsten Reboot** (Kernel-Parameter); danach hängt die dGPU an `vfio-pci` und fällt im Leerlauf in D3cold. Prüfen mit `lspci -nnk -d <vendor:device>` (erwartet: `Kernel driver in use: vfio-pci`).
 
-Hast du die Härtung gewählt, ist sie ab dem ersten Boot aktiv. Kurz-Verifikation: `usbguard list-devices --blocked` muss **leer** sein (sonst wurde ein internes Gerät nicht erfasst — Regel nachziehen), `sudo aa-status` zeigt geladene AppArmor-Profile, und ein gemounteter USB-Stick trägt `noexec` (`findmnt /run/media/$USER/*`). Neue USB-Geräte werden per Default **geblockt** und am Desktop gemeldet; dauerhaft erlauben über die versionierte Whitelist `hosts/<host>/usbguard-rules.conf` (Workflow und Details: `usbguard-sync.sh` und `README-hardening.md` im Referenz-Repo). Meldet der Installer, dass die Whitelist nicht erzeugt werden konnte, ist USBGuard aus — nachrüsten mit `bash usbguard-sync.sh --init` und anschließendem Rebuild.
+Hast du die Härtung gewählt, ist sie ab dem ersten Boot aktiv. Kurz-Verifikation: `usbguard list-devices --blocked` muss **leer** sein (sonst wurde ein internes Gerät nicht erfasst — Regel nachziehen), `aa-enabled` antwortet `Yes` (Hinweis: `sudo aa-status` meldet auf NixOS „Failed to get profiles: 2" — erwartet, da der AppArmor-Profilsatz dort faktisch leer ist; die Rechtebeschränkung erbringt die systemd-Dienst-Härtung, Details: `README-hardening.md` und `troubleshooting.md` §J im Referenz-Repo), `systemctl is-enabled virtlxcd.service` antwortet `masked`, und ein gemounteter USB-Stick trägt `noexec` (`findmnt /run/media/$USER/*`). Neue USB-Geräte werden per Default **geblockt** und am Desktop gemeldet; dauerhaft erlauben über die versionierte Whitelist `hosts/<host>/usbguard-rules.conf` (Workflow und Details: `usbguard-sync.sh` und `README-hardening.md` im Referenz-Repo). Meldet der Installer, dass die Whitelist nicht erzeugt werden konnte, ist USBGuard aus — nachrüsten mit `bash usbguard-sync.sh --init` und anschließendem Rebuild.
 
 Zum Sichern/Versionieren ein eigenes (separates, ggf. privates) Remote hinzufügen und pushen:
 
@@ -133,6 +131,18 @@ git push -u origin main
 ```
 
 Dieses Installer-Repo und deine generierte Config sind getrennte Repos.
+
+## Pflege-Hinweis (für Beiträge an diesem Repo)
+
+`install.sh` trägt **eingebettete Vollkopien** der Modul-Dateien als Heredocs — insbesondere `modules/hardening.nix`. Ändert sich das Modul im Referenz-Repo (`nixos-config`), muss der Heredoc hier nachgezogen werden, sonst installieren neue Hosts einen veralteten Stand (genau diese Drift ist 2026-07-20 einmal passiert). Prüf-Einzeiler vor jedem Commit — gehört wie `bash -n` + shellcheck zum Qualitäts-Gate:
+
+```bash
+diff <(awk "/^cat > modules\/hardening.nix <<'NIXEOF'\$/{f=1;next} /^NIXEOF\$/{f=0} f" install.sh) \
+     ../nixos-config/modules/hardening.nix \
+  && echo "Heredoc synchron" || echo "DRIFT: Heredoc nachziehen!"
+```
+
+(Bekannte, beabsichtigte shellcheck-Findings in `install.sh`: SC2015 und SC2086 — dokumentierte Ausnahmen, kein Handlungsbedarf.)
 
 ## Lizenz
 

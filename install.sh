@@ -113,54 +113,10 @@ for _gpu in $(lspci -Dn 2>/dev/null | awk '$2 ~ /^030[02]/ {print $1}'); do
 done
 
 # ===================== 1. Abfragen =====================
-# Alle Eingaben werden validiert und bei Fehleingabe erneut abgefragt. Hintergrund (Praxisfall):
-# Bei der frueher freien Locale-Frage wurde einmal "1" eingegeben (im Nummern-Rhythmus der
-# Menues) -> landete ungeprueft als i18n.defaultLocale = "1" in modules/desktop.nix -> der
-# glibc-locales-Build bricht erst SPAET im nixos-install ab ("unsupported locales detected:
-# 1/UTF-8"). Deshalb: frueh pruefen statt spaet scheitern. Siehe troubleshooting.md, A.
-# Regex-Muster liegen in Variablen: [[ =~ ]] erwartet sie UNquoted, sonst woertlicher Vergleich.
-RE_HOST='^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$'   # RFC-1123-Label; wird auch Flake-Attribut .#<host>
-RE_USER='^[a-z_][a-z0-9_-]{0,31}$'                        # POSIX-portabel; wird in Nix-Config + Pfade interpoliert
-RE_LOC='^[a-z]{2,3}_[A-Z]{2}\.UTF-8(@[a-z]+)?$'           # glibc-Name sprache_LAND.UTF-8[@modifier]
-RE_XKB='^[a-z]{2,3}(,[a-z]{2,3})*$'                       # kommagetrennte xkb-Codes
-
-while :; do
-  read -rp "Hostname [nixos]: " HOST; HOST="${HOST:-nixos}"
-  [[ $HOST =~ $RE_HOST ]] && break
-  echo "  Ungueltig. Erlaubt: Buchstaben/Ziffern/'-', 1-63 Zeichen, kein '-' am Anfang/Ende."
-done
-while :; do
-  read -rp "Benutzername [user]: " USER_; USER_="${USER_:-user}"
-  if [ "$USER_" = "root" ]; then echo "  'root' geht nicht (wird separat eingerichtet)."; continue; fi
-  [[ $USER_ =~ $RE_USER ]] && break
-  echo "  Ungueltig. Erlaubt: a-z/0-9/'_'/'-' (klein), Beginn mit Buchstabe oder '_', max. 32 Zeichen."
-done
-while :; do
-  read -rp "Zeitzone [Europe/Berlin]: " TZ; TZ="${TZ:-Europe/Berlin}"
-  if [ -e "/etc/zoneinfo/$TZ" ] || timedatectl list-timezones 2>/dev/null | grep -qx "$TZ"; then break; fi
-  echo "  Unbekannte Zeitzone. Format Gebiet/Ort, z.B. Europe/Berlin (Liste: timedatectl list-timezones)."
-done
-
-echo
-echo "Locale (Systemsprache/-formate):"
-echo "  1) de_DE.UTF-8   (Deutsch)"
-echo "  2) en_US.UTF-8   (Englisch US)"
-echo "  3) en_GB.UTF-8   (Englisch UK)"
-echo "  4) eigene        (glibc-Name, z.B. fr_FR.UTF-8)"
-while :; do
-  read -rp "Auswahl [1]: " LSEL; LSEL="${LSEL:-1}"
-  case "$LSEL" in
-    1) LOC="de_DE.UTF-8"; break ;;
-    2) LOC="en_US.UTF-8"; break ;;
-    3) LOC="en_GB.UTF-8"; break ;;
-    4) while :; do
-         read -rp "Locale: " LOC
-         [[ $LOC =~ $RE_LOC ]] && break 2
-         echo "  Ungueltiges Format. Erwartet sprache_LAND.UTF-8[@modifier], z.B. fr_FR.UTF-8."
-       done ;;
-    *) echo "  Bitte 1-4 waehlen." ;;
-  esac
-done
+read -rp "Hostname [nixos]: " HOST;      HOST="${HOST:-nixos}"
+read -rp "Benutzername [user]: " USER_;  USER_="${USER_:-user}"
+read -rp "Zeitzone [Europe/Berlin]: " TZ; TZ="${TZ:-Europe/Berlin}"
+read -rp "Locale [de_DE.UTF-8]: " LOC;    LOC="${LOC:-de_DE.UTF-8}"
 
 echo
 echo "Tastaturlayout (xkb):"
@@ -170,19 +126,13 @@ echo "  3) gb            (Englisch UK)"
 echo "  4) de,us         (Deutsch + Englisch-US, umschaltbar mit Alt+Shift)"
 echo "  5) de,gb         (Deutsch + Englisch-UK, umschaltbar mit Alt+Shift)"
 echo "  6) eigene        (kommagetrennte xkb-Codes, z.B. de,us,fr)"
-while :; do
-  read -rp "Auswahl [1]: " KB; KB="${KB:-1}"
-  case "$KB" in
-    1) XKB="de"; break ;;  2) XKB="us"; break ;;  3) XKB="gb"; break ;;
-    4) XKB="de,us"; break ;;  5) XKB="de,gb"; break ;;
-    6) while :; do
-         read -rp "xkb-Layouts: " XKB; XKB="${XKB:-de}"
-         [[ $XKB =~ $RE_XKB ]] && break 2
-         echo "  Ungueltiges Format. Kommagetrennte xkb-Codes, z.B. de,us,fr."
-       done ;;
-    *) echo "  Bitte 1-6 waehlen." ;;
-  esac
-done
+read -rp "Auswahl [1]: " KB; KB="${KB:-1}"
+case "$KB" in
+  1) XKB="de" ;;  2) XKB="us" ;;  3) XKB="gb" ;;
+  4) XKB="de,us" ;;  5) XKB="de,gb" ;;
+  6) read -rp "xkb-Layouts: " XKB; XKB="${XKB:-de}" ;;
+  *) XKB="de" ;;
+esac
 
 # Optional: generische Update-Erinnerung (Desktop-Icon + stuendlicher Notify-Timer + update-all.sh
 # + fwupd fuer Firmware/BIOS). Erzeugt modules/host-updates.nix + update-all.sh und haengt das
@@ -199,6 +149,17 @@ case "$HU" in [nN]*) HOSTUPDATES=0 ;; *) HOSTUPDATES=1 ;; esac
 echo
 read -rp "Host-Haertung nach BSI SYS.2.3 einrichten? (AppArmor, USBGuard, sysctl) [J/n]: " HD
 case "$HD" in [nN]*) HARDENING=0 ;; *) HARDENING=1 ;; esac
+
+# Kernel-Wahl: Mainline (linuxPackages_latest) statt LTS. Default J: der LTS-i915 scheiterte
+# auf Meteor Lake an MST-Daisy-Chains mit hoher Bandbreite (DSC over MST) — nur Monitor 1 kam;
+# Mainline fixt das (verifiziert 2026-07-20, devbook/Kernel 7.1.4; Doku: aufbau.md §9
+# "Kernel-Wahl", Fehlerbild: troubleshooting.md Abschnitt J). Kein lokaler Kernel-BUILD:
+# das Paket kommt fuer den gepinnten nixpkgs-Stand fertig aus dem NixOS-Binary-Cache —
+# die Installation laedt es nur herunter. Trade-off bei N (LTS): seltenere Kernel-Bumps
+# via update-all.sh, dafuer aeltere Hardware-/Display-Unterstuetzung.
+echo
+read -rp "Mainline-Kernel (linuxPackages_latest) statt LTS verwenden? [J/n]: " KL
+case "$KL" in [nN]*) KERNEL_LATEST=0 ;; *) KERNEL_LATEST=1 ;; esac
 
 # Optional: dGPU an vfio-pci binden fuer D3cold-Stromsparen — nur wenn oben eine D3cold-faehige
 # dGPU erkannt wurde (sonst erscheint die Frage gar nicht).
@@ -563,6 +524,15 @@ esac
 XKBOPT=""
 case "$XKB" in *,*) XKBOPT='  services.xserver.xkb.options = "grp:alt_shift_toggle";' ;; esac
 
+# Kernel-Zeile fuer modules/desktop.nix — aus der Frage oben (KERNEL_LATEST, Default J).
+# Kommt fertig gebaut aus dem Binary-Cache; Abwahl pro Host spaeter via
+# boot.kernelPackages = lib.mkForce pkgs.linuxPackages; in hosts/<host>/configuration.nix.
+if [ "$KERNEL_LATEST" = "1" ]; then
+  KERNELLINE='  boot.kernelPackages = pkgs.linuxPackages_latest;   # Mainline — Default (MST/DSC-Fix, s. aufbau.md §9)'
+else
+  KERNELLINE='  boot.kernelPackages = pkgs.linuxPackages;   # LTS — bewusste Abwahl des Mainline-Defaults (Frage im Installer)'
+fi
+
 # ── Geteilter Desktop-Stack als generisches Modul (host-unabhaengig) ──────────
 # Regionale Werte (Zeitzone/Locale/Tastatur) werden hier fixiert -> konsistent ueber
 # alle Hosts. Spaeter aus jeder Host-Config importierbar (modulares Multi-Host-Setup).
@@ -576,7 +546,7 @@ cat > modules/desktop.nix <<EOF
   boot.loader.systemd-boot.configurationLimit = 10;   # ESP nicht mit alten Generationen volllaufen lassen
   boot.loader.efi.canTouchEfiVariables = true;
   boot.initrd.systemd.enable = true;
-  boot.kernelPackages = pkgs.linuxPackages;
+$KERNELLINE
 
   hardware.enableRedistributableFirmware = true;   # WLAN-/GPU-Firmware
   hardware.graphics.enable = true;                 # iGPU / Desktop
@@ -1269,10 +1239,11 @@ cat > modules/hardening.nix <<'NIXEOF'
 #
 # Abdeckung (Details + Erlaeuterungstexte fuer den GSC: README-hardening.md):
 #   A6  (S) Wechsellaufwerke: kein Automount-Zwang, udisks2 mountet noexec/nosuid/nodev
-#   A8  (S) AppArmor aktiv (+ mitgelieferte Profile; Abdeckung ehrlich dokumentiert)
+#   A8  (S) AppArmor-LSM aktiv; Profilsatz auf NixOS faktisch leer -> Wirkung wird
+#           NixOS-nativ ueber systemd erbracht (Dienst-Maskierung + Sandboxing, s. unten)
 #   A11 (S) Ueberlauf-Schutz: nix-GC + min-free/max-free + journald-Deckel
 #   A14 (H) USBGuard: Whitelist aus dem Repo (deklarativ = "zentral verwaltet")
-#   A17 (H) via A8 + VM-Isolation (keine exponierten Host-Dienste; s. README)
+#   A17 (H) via VM-Isolation + Dienst-Maskierung/-Sandboxing (Messverfahren: README)
 #   A18 (H) sysctl-Haertung statt hardened Kernel (Begruendung: libvirt/VFIO-Rueckgrat)
 #   A20 (H) SysRq auf 16 (nur Sync) — NixOS-Default, hier explizit/deterministisch
 #
@@ -1311,10 +1282,13 @@ in
     };
 
     # ===== A8 — AppArmor (S) ==================================================
-    # Kernel-LSM aktiv + die in nixpkgs mitgelieferten Profile. Ehrlich: die
-    # Profilabdeckung in nixpkgs ist duenn (deutlich unter Debian/Ubuntu-Niveau);
-    # der eigentliche Schutz exponierter Workloads ist hier die VM-Grenze
-    # (browser-VM/dev-VM), AppArmor ist die Zusatzschicht auf dem Host.
+    # Kernel-LSM aktiv. Ehrlicher Befund (empirisch, 2026-07-20): der geladene
+    # Profilsatz ist LEER — die Upstream-Sammlung (apparmor-profiles) adressiert
+    # FHS-Pfade und greift auf NixOS-Store-Pfaden nicht. Das LSM bleibt bewusst an
+    # (kostenneutral; Pakete mit eigenen Profilen koennen andocken), die eigentliche
+    # Rechtebeschraenkung erbringt der systemd-Baustein unten. Nebenbefund: aa-status
+    # scheitert am leeren Profilsatz mit "Failed to get profiles: 2" — Tooling, kein
+    # Sicherheitsproblem (s. troubleshooting.md, Abschnitt J).
     # killUnconfinedConfinables bleibt AUS (konservativ: kein Abschiessen laufender
     # Prozesse beim Profil-Reload).
     security.apparmor = {
@@ -1322,6 +1296,57 @@ in
       packages = [ pkgs.apparmor-profiles ];
       killUnconfinedConfinables = false;
     };
+
+    # ===== A8/A17-Ergaenzung — systemd-Dienst-Haertung ========================
+    # Da AppArmor faktisch ohne Profile laeuft (s. oben), wird die Rechtebeschraenkung
+    # einzelner Dienste NixOS-nativ ueber systemd erbracht. Bestandsaufnahme,
+    # Korb-Einteilung und Nachmessung: README-hardening.md, Abschnitt
+    # "systemd-analyze security" (Baseline devbook 2026-07-20).
+    #
+    # (a) Angriffsflaeche ENTFERNEN statt sandboxen: die modularen libvirt-
+    # Treiber-Daemons fuer nicht genutzte Hypervisoren (LXC, VirtualBox, Xen)
+    # werden maskiert — dieser Verbund faehrt ausschliesslich QEMU/KVM
+    # (virtqemud bleibt unangetastet). Die Sockets MUESSEN mit maskiert werden,
+    # sonst belebt Socket-Aktivierung die Dienste wieder. enable=false maskiert
+    # die Unit in NixOS (Symlink auf /dev/null); auf Hosts ohne libvirt: No-op.
+    # Baseline-Wirkung: drei Eintraege mit Score 9.6 UNSAFE entfallen ersatzlos.
+    #
+    # (b) acpid sandboxen: kleiner root-Daemon (kam mit dem NVIDIA-Stack auf
+    # devbook), nimmt ACPI-Events via Netlink entgegen und startet Handler-
+    # Skripte. Konservatives Sandboxing: Dateisystem weitgehend read-only,
+    # nur AF_UNIX+AF_NETLINK, keine neuen Privilegien/Namespaces — die
+    # Handler (acEvent/lidEvent/powerEvent) laufen unveraendert als root.
+    # Guard: mkIf services.acpid.enable — auf Hosts OHNE acpid (z. B. ohne
+    # NVIDIA-Stack) entsteht sonst eine leere Unit-Huelle. Verifiziert devbook
+    # 2026-07-20: Score 9.6 UNSAFE -> 5.7 MEDIUM, AC-Events fehlerfrei.
+    # Bewusst NICHT gesetzt: ProtectSystem=strict, CapabilityBoundingSet,
+    # SystemCallFilter — erst nach laengerer Beobachtung nachziehen (konservativ).
+    # Stufe 2 (Merkposten): virtlogd/virtlockd sandboxen (simple Helfer, je 9.6).
+    systemd.services = lib.genAttrs [ "virtlxcd" "virtvboxd" "virtxend" ]
+      (_: { enable = false; })
+    // {
+      acpid = lib.mkIf config.services.acpid.enable {
+        serviceConfig = {
+          NoNewPrivileges = true;
+          PrivateTmp = true;
+          ProtectSystem = "full";            # /usr,/boot,/etc read-only (Store ist ohnehin ro)
+          ProtectHome = true;
+          ProtectKernelModules = true;
+          ProtectKernelLogs = true;
+          ProtectControlGroups = true;
+          ProtectClock = true;
+          RestrictAddressFamilies = [ "AF_UNIX" "AF_NETLINK" ];
+          RestrictNamespaces = true;
+          RestrictRealtime = true;
+          RestrictSUIDSGID = true;
+          LockPersonality = true;
+          SystemCallArchitectures = "native";
+        };
+      };
+    };
+    systemd.sockets = lib.genAttrs
+      (lib.concatMap (d: [ d "${d}-ro" "${d}-admin" ]) [ "virtlxcd" "virtvboxd" "virtxend" ])
+      (_: { enable = false; });
 
     # ===== A11 — Schutz vor Ueberlastung der Platte (S) =======================
     # Der realistische Vollaeufer auf NixOS ist /nix (ein btrfs-Pool, keine Quotas —
@@ -1408,7 +1433,7 @@ in
   };
 }
 NIXEOF
-echo "  -> modules/hardening.nix angelegt (SYS.2.3: AppArmor, USBGuard, sysctl, udisks2-noexec)."
+echo "  -> modules/hardening.nix angelegt (SYS.2.3: AppArmor-LSM, systemd-Dienst-Haertung, USBGuard, sysctl, udisks2-noexec)."
 fi
 
 
