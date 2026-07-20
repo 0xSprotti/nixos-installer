@@ -79,7 +79,7 @@ Bei Pool/Spiegel liegt ein LUKS über dem RAID → eine Passphrase; die ESP (`/b
 
 ```
 ~/nixos-config/
-├── flake.nix
+├── flake.nix                      # AUTO-DISCOVERY: Outputs werden aus hosts/ abgeleitet (Ordner = Host)
 ├── modules/
 │   ├── desktop.nix                # geteilter Desktop-/Basis-Stack (Boot, Netz, Locale, KDE)
 │   ├── host-updates.nix           # nur mit Update-Erinnerung: Icon + Notify-Timer (Snooze via systemd) + fwupd/LVFS
@@ -94,7 +94,9 @@ Bei Pool/Spiegel liegt ein LUKS über dem RAID → eine Passphrase; die ESP (`/b
     └── DETECTED-HARDWARE.txt      # GPU/WLAN-IDs als Referenz (nicht aktiv)
 ```
 
-Der geteilte Stack (Boot, Netzwerk, Locale, Tastatur, KDE, Basis-Pakete) liegt in `modules/desktop.nix`; die regionalen Werte (Zeitzone/Locale/Tastatur) sind dort aus den Abfragen fixiert. Die `hosts/<host>/configuration.nix` importiert dieses Modul und setzt nur das Maschinenspezifische (Hostname, Benutzer, ggf. die `host.passthroughIds` der dGPU). So lassen sich später weitere Hosts anlegen, die denselben Desktop-Stack teilen. Das `modules/vfio.nix` ist generisch und mischbar — spätere VMs können eigene Geräte-IDs beitragen.
+Der geteilte Stack (Boot, Netzwerk, Locale, Tastatur, KDE, Basis-Pakete) liegt in `modules/desktop.nix`; die regionalen Werte (Zeitzone/Locale/Tastatur) sind dort aus den Abfragen fixiert. Die `hosts/<host>/configuration.nix` importiert dieses Modul und setzt nur das Maschinenspezifische (Hostname, Benutzer, ggf. die `host.passthroughIds` der dGPU). Das `modules/vfio.nix` ist generisch und mischbar — spätere VMs können eigene Geräte-IDs beitragen.
+
+Die erzeugte `flake.nix` ist **host-agnostisch** (Auto-Discovery): Die `nixosConfigurations` werden per `readDir` aus `hosts/` abgeleitet. Konvention: `configuration.nix` ist Pflicht (Ordner ohne sie werden ignoriert); liegt zusätzlich eine `hardware-configuration.nix` im Ordner, gilt der Eintrag als **physischer Host** und bekommt automatisch disko + `disk.nix` + `hardware-configuration.nix` eingebunden; ohne sie ist es eine **VM** (nur `configuration.nix`). **Weitere Maschinen oder VMs sind damit nur ein weiterer Ordner unter `hosts/` — kein Flake-Edit.** Das macht das Repo flottentauglich: Eine auf Maschine B erzeugte `hosts/B/` lässt sich per Ordner-Kopie in ein bestehendes Verbund-Repo übernehmen (`git add -A`, `nixos-rebuild switch --flake .#B`) — die Repos sind strukturgleich.
 
 ## Weiterverwenden
 
@@ -134,15 +136,19 @@ Dieses Installer-Repo und deine generierte Config sind getrennte Repos.
 
 ## Pflege-Hinweis (für Beiträge an diesem Repo)
 
-`install.sh` trägt **eingebettete Vollkopien** der Modul-Dateien als Heredocs — insbesondere `modules/hardening.nix`. Ändert sich das Modul im Referenz-Repo (`nixos-config`), muss der Heredoc hier nachgezogen werden, sonst installieren neue Hosts einen veralteten Stand (genau diese Drift ist 2026-07-20 einmal passiert). Prüf-Einzeiler vor jedem Commit — gehört wie `bash -n` + shellcheck zum Qualitäts-Gate:
+`install.sh` trägt **eingebettete Vollkopien** der Modul-Dateien als Heredocs — insbesondere `modules/hardening.nix` und die (host-agnostische) `flake.nix`. Ändert sich eine Quelle im Referenz-Repo (`nixos-config`), muss der jeweilige Heredoc hier nachgezogen werden, sonst installieren neue Hosts einen veralteten Stand (genau diese Drift ist 2026-07-20 einmal passiert). Prüf-Einzeiler vor jedem Commit — gehören wie `bash -n` + shellcheck zum Qualitäts-Gate:
 
 ```bash
 diff <(awk "/^cat > modules\/hardening.nix <<'NIXEOF'\$/{f=1;next} /^NIXEOF\$/{f=0} f" install.sh) \
      ../nixos-config/modules/hardening.nix \
-  && echo "Heredoc synchron" || echo "DRIFT: Heredoc nachziehen!"
+  && echo "hardening-Heredoc synchron" || echo "DRIFT: hardening-Heredoc nachziehen!"
+
+diff <(awk "/^cat > flake.nix <<'NIXEOF'\$/{f=1;next} /^NIXEOF\$/{f=0} f" install.sh) \
+     ../nixos-config/flake.nix \
+  && echo "flake-Heredoc synchron" || echo "DRIFT: flake-Heredoc nachziehen!"
 ```
 
-(Bekannte, beabsichtigte shellcheck-Findings in `install.sh`: SC2015 und SC2086 — dokumentierte Ausnahmen, kein Handlungsbedarf.)
+shellcheck läuft ad hoc ohne Installation: `nix run nixpkgs#shellcheck -- install.sh`. Die Findings-Baseline ist **versionsabhängig**: shellcheck 0.9.0 meldet SC2015 + SC2086, aktuelle Versionen nur noch SC2086 — beide sind bekannte, beabsichtigte Ausnahmen, kein Handlungsbedarf; **neue** Findings dagegen schon.
 
 ## Lizenz
 
