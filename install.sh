@@ -113,10 +113,54 @@ for _gpu in $(lspci -Dn 2>/dev/null | awk '$2 ~ /^030[02]/ {print $1}'); do
 done
 
 # ===================== 1. Abfragen =====================
-read -rp "Hostname [nixos]: " HOST;      HOST="${HOST:-nixos}"
-read -rp "Benutzername [user]: " USER_;  USER_="${USER_:-user}"
-read -rp "Zeitzone [Europe/Berlin]: " TZ; TZ="${TZ:-Europe/Berlin}"
-read -rp "Locale [de_DE.UTF-8]: " LOC;    LOC="${LOC:-de_DE.UTF-8}"
+# Alle Eingaben werden validiert und bei Fehleingabe erneut abgefragt. Hintergrund (Praxisfall):
+# Bei der frueher freien Locale-Frage wurde einmal "1" eingegeben (im Nummern-Rhythmus der
+# Menues) -> landete ungeprueft als i18n.defaultLocale = "1" in modules/desktop.nix -> der
+# glibc-locales-Build bricht erst SPAET im nixos-install ab ("unsupported locales detected:
+# 1/UTF-8"). Deshalb: frueh pruefen statt spaet scheitern. Siehe troubleshooting.md, A.
+# Regex-Muster liegen in Variablen: [[ =~ ]] erwartet sie UNquoted, sonst woertlicher Vergleich.
+RE_HOST='^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$'   # RFC-1123-Label; wird auch Flake-Attribut .#<host>
+RE_USER='^[a-z_][a-z0-9_-]{0,31}$'                        # POSIX-portabel; wird in Nix-Config + Pfade interpoliert
+RE_LOC='^[a-z]{2,3}_[A-Z]{2}\.UTF-8(@[a-z]+)?$'           # glibc-Name sprache_LAND.UTF-8[@modifier]
+RE_XKB='^[a-z]{2,3}(,[a-z]{2,3})*$'                       # kommagetrennte xkb-Codes
+
+while :; do
+  read -rp "Hostname [nixos]: " HOST; HOST="${HOST:-nixos}"
+  [[ $HOST =~ $RE_HOST ]] && break
+  echo "  Ungueltig. Erlaubt: Buchstaben/Ziffern/'-', 1-63 Zeichen, kein '-' am Anfang/Ende."
+done
+while :; do
+  read -rp "Benutzername [user]: " USER_; USER_="${USER_:-user}"
+  if [ "$USER_" = "root" ]; then echo "  'root' geht nicht (wird separat eingerichtet)."; continue; fi
+  [[ $USER_ =~ $RE_USER ]] && break
+  echo "  Ungueltig. Erlaubt: a-z/0-9/'_'/'-' (klein), Beginn mit Buchstabe oder '_', max. 32 Zeichen."
+done
+while :; do
+  read -rp "Zeitzone [Europe/Berlin]: " TZ; TZ="${TZ:-Europe/Berlin}"
+  if [ -e "/etc/zoneinfo/$TZ" ] || timedatectl list-timezones 2>/dev/null | grep -qx "$TZ"; then break; fi
+  echo "  Unbekannte Zeitzone. Format Gebiet/Ort, z.B. Europe/Berlin (Liste: timedatectl list-timezones)."
+done
+
+echo
+echo "Locale (Systemsprache/-formate):"
+echo "  1) de_DE.UTF-8   (Deutsch)"
+echo "  2) en_US.UTF-8   (Englisch US)"
+echo "  3) en_GB.UTF-8   (Englisch UK)"
+echo "  4) eigene        (glibc-Name, z.B. fr_FR.UTF-8)"
+while :; do
+  read -rp "Auswahl [1]: " LSEL; LSEL="${LSEL:-1}"
+  case "$LSEL" in
+    1) LOC="de_DE.UTF-8"; break ;;
+    2) LOC="en_US.UTF-8"; break ;;
+    3) LOC="en_GB.UTF-8"; break ;;
+    4) while :; do
+         read -rp "Locale: " LOC
+         [[ $LOC =~ $RE_LOC ]] && break 2
+         echo "  Ungueltiges Format. Erwartet sprache_LAND.UTF-8[@modifier], z.B. fr_FR.UTF-8."
+       done ;;
+    *) echo "  Bitte 1-4 waehlen." ;;
+  esac
+done
 
 echo
 echo "Tastaturlayout (xkb):"
@@ -126,13 +170,19 @@ echo "  3) gb            (Englisch UK)"
 echo "  4) de,us         (Deutsch + Englisch-US, umschaltbar mit Alt+Shift)"
 echo "  5) de,gb         (Deutsch + Englisch-UK, umschaltbar mit Alt+Shift)"
 echo "  6) eigene        (kommagetrennte xkb-Codes, z.B. de,us,fr)"
-read -rp "Auswahl [1]: " KB; KB="${KB:-1}"
-case "$KB" in
-  1) XKB="de" ;;  2) XKB="us" ;;  3) XKB="gb" ;;
-  4) XKB="de,us" ;;  5) XKB="de,gb" ;;
-  6) read -rp "xkb-Layouts: " XKB; XKB="${XKB:-de}" ;;
-  *) XKB="de" ;;
-esac
+while :; do
+  read -rp "Auswahl [1]: " KB; KB="${KB:-1}"
+  case "$KB" in
+    1) XKB="de"; break ;;  2) XKB="us"; break ;;  3) XKB="gb"; break ;;
+    4) XKB="de,us"; break ;;  5) XKB="de,gb"; break ;;
+    6) while :; do
+         read -rp "xkb-Layouts: " XKB; XKB="${XKB:-de}"
+         [[ $XKB =~ $RE_XKB ]] && break 2
+         echo "  Ungueltiges Format. Kommagetrennte xkb-Codes, z.B. de,us,fr."
+       done ;;
+    *) echo "  Bitte 1-6 waehlen." ;;
+  esac
+done
 
 # Optional: generische Update-Erinnerung (Desktop-Icon + stuendlicher Notify-Timer + update-all.sh
 # + fwupd fuer Firmware/BIOS). Erzeugt modules/host-updates.nix + update-all.sh und haengt das
