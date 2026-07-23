@@ -401,7 +401,7 @@ PL_URL="$(git -C "$SCRIPT_DIR" remote get-url origin 2>/dev/null || true)"
   else
     printf '# basis=<url-des-installer-repos>   # nicht ermittelbar (kein git-Klon?) — bitte eintragen\n'
   fi
-  printf '# extensions=<url-nach-kauf>#<tag>\n'
+  printf '# Produkt-Quellen nach Kauf, je Zeile — z. B.: vm=<url>#<tag>\n'
 } > payload-sources.conf
 
 # flake.nix kommt aus dem Basis-Payload (files/): Auto-Discovery — neue Hosts

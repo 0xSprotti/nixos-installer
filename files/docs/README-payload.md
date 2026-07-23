@@ -29,10 +29,11 @@ Zielstruktur 1:1 spiegelt, plus README und Lizenz — **keine Skripte** (die ges
 - **Basis** (öffentlich): Installer, geteilte Module (`desktop`, `hardening`, `vfio`,
   `host-updates`), `update-all.sh`, USBGuard-Werkzeuge, generische Doku, `flake.nix`
   (Auto-Discovery — neue Hosts und VM-Gäste werden ohne Flake-Änderung erkannt).
-- **Extensions** (privat, kostenpflichtig — Zugang als Repo-Collaborator): abgeschlossene
-  Wert-Pakete, z. B. die **VM-Suite** (Zero-Trust-browser-VM, dev-VM, VM-Netz-Isolierung,
-  Deploys, Checks, Doku). Weitere Module (etwa AD-Integration) erscheinen als eigene Quelle
-  nach demselben Muster.
+- **Extensions** (privat, kostenpflichtig — Zugang als Repo-Collaborator, je Produkt ein
+  eigenes Repo `nixos-extensions-<produkt>`): abgeschlossene Wert-Pakete, z. B. die
+  **VM-Suite** (`nixos-extensions-vm`: Zero-Trust-browser-VM, dev-VM, VM-Netz-Isolierung,
+  Deploys, Checks, Doku). Weitere Produkte (etwa AD-Integration) erscheinen als eigene
+  Quelle/eigenes Repo nach demselben Muster.
 
 ---
 
@@ -44,7 +45,8 @@ Liegt in der Repo-Wurzel; `install.sh` legt sie mit der Basis-Zeile an. Format �
 ```
 # name=url-oder-pfad[#ref]     ref = Branch, Tag oder Commit (Pin)
 basis=https://github.com/<anbieter>/nixos-installer.git#v1
-# extensions=git@github.com:<anbieter>/nixos-extensions.git#v1   # nach Kauf eintragen
+# vm=git@github.com:<anbieter>/nixos-extensions-vm.git#v1        # nach Kauf eintragen
+# (weitere Produkte nach demselben Muster, z. B. ad=…)
 ```
 
 Drei Betriebsmodelle, jeweils **eine Zeilen-Änderung**:
@@ -59,7 +61,7 @@ Drei Betriebsmodelle, jeweils **eine Zeilen-Änderung**:
 
 **Regel:** Jede Quelle muss ein **Git-Repo** sein (auch der Spiegel) — die Versions-Identität
 einer Übernahme ist der Git-Stand der Quelle, er landet in der Commit-Message (s. u.).
-Basis und Extensions zusammen aktualisieren (gleicher Release-Stand), nicht mischen.
+Basis und Extensions-Produkte zusammen aktualisieren (gleicher Release-Stand), nicht mischen.
 
 ---
 
@@ -96,10 +98,10 @@ Kommandos samt Erklärung: `git-cheatsheet.md`, Abschnitt 12.
 
 ---
 
-## 6. Extensions aktivieren (Beispiel VM-Suite)
+## 6. Ein Extensions-Produkt aktivieren (Beispiel VM-Suite)
 
-1. Zugang erhalten (Collaborator auf dem Extensions-Repo), dann die `extensions=`-Zeile in
-   `payload-sources.conf` eintragen (Abschnitt 3).
+1. Zugang erhalten (Collaborator auf dem Produkt-Repo), dann die Quellen-Zeile in
+   `payload-sources.conf` eintragen (Abschnitt 3) — z. B. `vm=…nixos-extensions-vm.git#v1`.
 2. `bash update-all.sh` — das Gate zeigt einmalig alle Suite-Dateien als Diff, `J` übernimmt.
 3. Aktivieren (bewusste Host-Entscheidung, drei Zeilen in `hosts/<host>/configuration.nix`):
    das Import der VM-Module plus `networking.nftables.enable = true;` und
