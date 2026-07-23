@@ -161,7 +161,11 @@ payload_sync_source() {  # $1 = Name, $2 = url-oder-pfad[#ref]
       return 0
     fi
   fi
-  git -C "$cache" fetch -q --tags origin 2>/dev/null \
+  # --force: laesst fetch auch VERSCHOBENEN Tags folgen. Ohne das verweigert git das
+  # Tag-Update, exit != 0, und die offline-Warnung luegt bei intaktem Netz (erlebt
+  # 2026-07-23 nach den v1-Fixup-Verschiebungen vor Kundenstart; Branch-Refs waren
+  # laengst aktuell). Policy unveraendert: veroeffentlichte Kunden-Tags sind unantastbar.
+  git -C "$cache" fetch -q --tags --force origin 2>/dev/null \
     || warn "Payload '${name}': fetch fehlgeschlagen (offline?) — nutze letzten Cache-Stand."
   if [ -n "$ref" ]; then
     git -C "$cache" checkout -q --detach "origin/${ref}" 2>/dev/null \
