@@ -157,8 +157,10 @@ esac
 echo
 read -rp "Mainline-Kernel (latest) verwenden? [J/n]: " KM
 case "$KM" in
-  [nN]*) KERNEL_LINE='  boot.kernelPackages = pkgs.linuxPackages;   # LTS statt Flotten-Vorschlag Mainline (s. modules/desktop.nix)' ;;
-  *)     KERNEL_LINE='' ;;
+  [nN]*) KERNEL_LINE='  boot.kernelPackages = pkgs.linuxPackages;   # LTS statt Flotten-Vorschlag Mainline (s. modules/desktop.nix)'
+         KERNEL_DESC='LTS (Host-Override)' ;;
+  *)     KERNEL_LINE='  # Kernel: Flotten-Vorschlag Mainline/latest greift (mkDefault in modules/desktop.nix) — kein Override.'
+         KERNEL_DESC='Mainline/latest (Flotten-Vorschlag)' ;;
 esac
 
 # Optional: generische Update-Erinnerung (Desktop-Icon + stuendlicher Notify-Timer + update-all.sh
@@ -362,6 +364,7 @@ cat <<SUMMARY
   Zeitzone   : $TZ
   Locale     : $LOC
   Tastatur   : $XKB    (mehrere Layouts: $MULTI)
+  Kernel     : $KERNEL_DESC
   Haertung   : $( [ "$HARDENING" = "1" ] && echo "ja (SYS.2.3: AppArmor, USBGuard, sysctl)" || echo "nein" )
   Layout     : $MODE_DESC
   dGPU->vfio : $VFIO_DESC
