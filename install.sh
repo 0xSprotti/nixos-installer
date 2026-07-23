@@ -4,6 +4,11 @@
 # Fragt Hostname/Benutzer/Tastatur ab, erkennt die Zielplatte, erzeugt das
 # Config-Repo unter ~/nixos-config und installiert. Keine persoenlichen Daten im Skript.
 #
+# WICHTIG: install.sh reist mit dem Installer-Repo — der files/-Payload daneben
+# (Module, update-all.sh, Doku, flake.nix) IST die Basis des erzeugten Repos.
+# Deshalb das Repo KOMPLETT klonen und daraus starten; ein Einzeldatei-Download
+# bricht frueh mit klarer Meldung ab.
+#
 # Pruef-Lauf (nur Dateien erzeugen, nichts loeschen):
 #   bash install.sh --dry-run
 # Echter Lauf:
@@ -11,6 +16,17 @@
 # (Das Skript holt fehlende Tools - git/mkpasswd/pciutils - selbst via nix-shell.)
 #
 set -euo pipefail
+
+# ── Schutzgitter: files/-Payload muss neben install.sh liegen (Repo-Klon!) ──
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ ! -f "$SCRIPT_DIR/files/flake.nix" ] \
+   || [ ! -f "$SCRIPT_DIR/files/modules/hardening.nix" ] \
+   || [ ! -f "$SCRIPT_DIR/files/update-all.sh" ]; then
+  echo "FEHLER: files/-Payload fehlt neben install.sh." >&2
+  echo "        install.sh ist KEIN Einzeldatei-Download — bitte das Installer-Repo" >&2
+  echo "        komplett klonen (git clone <repo-url>) und 'bash install.sh' daraus starten." >&2
+  exit 1
+fi
 
 # Selbst-Bootstrap: fehlen git/mkpasswd/pciutils, einmal in einer nix-shell mit
 # diesen Tools neu starten. So genuegt der Aufruf:  bash install.sh [--dry-run]
@@ -134,10 +150,21 @@ case "$KB" in
   *) XKB="de" ;;
 esac
 
+# Kernel-Wahl: Mainline (latest) ist der Flotten-VORSCHLAGSWERT in modules/desktop.nix
+# (mkDefault) — Hintergrund: der LTS-i915 scheiterte auf Meteor Lake an MST-Daisy-
+# Chains mit DSC; Fehlerbild + Plattform-Grenzen: docs/troubleshooting.md, Abschnitt J.
+# 'n' schreibt einen LTS-Override in die Host-Config (normale Zuweisung genuegt).
+echo
+read -rp "Mainline-Kernel (latest) verwenden? [J/n]: " KM
+case "$KM" in
+  [nN]*) KERNEL_LINE='  boot.kernelPackages = pkgs.linuxPackages;   # LTS statt Flotten-Vorschlag Mainline (s. modules/desktop.nix)' ;;
+  *)     KERNEL_LINE='' ;;
+esac
+
 # Optional: generische Update-Erinnerung (Desktop-Icon + stuendlicher Notify-Timer + update-all.sh
 # + fwupd fuer Firmware/BIOS). Erzeugt modules/host-updates.nix + update-all.sh und haengt das
 # Modul in die Host-Config. Default J (Enter = installieren): Die Update-Mechanik gehoert zur
-# Basis — der alte Default N wurde beim Durchklicken still uebersprungen (troubleshooting.md, D).
+# Basis — der alte Default N wurde beim Durchklicken still uebersprungen (docs/troubleshooting.md, D).
 echo
 read -rp "Update-Erinnerung installieren? (Desktop-Icon + stuendlicher Update-Check + fwupd) [J/n]: " HU
 case "$HU" in [nN]*) HOSTUPDATES=0 ;; *) HOSTUPDATES=1 ;; esac
@@ -150,25 +177,21 @@ echo
 read -rp "Host-Haertung nach BSI SYS.2.3 einrichten? (AppArmor, USBGuard, sysctl) [J/n]: " HD
 case "$HD" in [nN]*) HARDENING=0 ;; *) HARDENING=1 ;; esac
 
-# Kernel-Wahl: Mainline (linuxPackages_latest) statt LTS. Default J: der LTS-i915 scheiterte
-# auf Meteor Lake an MST-Daisy-Chains mit hoher Bandbreite (DSC over MST) — nur Monitor 1 kam;
-# Mainline fixt das (verifiziert 2026-07-20, devbook/Kernel 7.1.4; Doku: aufbau.md §9
-# "Kernel-Wahl", Fehlerbild: troubleshooting.md Abschnitt J). Kein lokaler Kernel-BUILD:
-# das Paket kommt fuer den gepinnten nixpkgs-Stand fertig aus dem NixOS-Binary-Cache —
-# die Installation laedt es nur herunter. Trade-off bei N (LTS): seltenere Kernel-Bumps
-# via update-all.sh, dafuer aeltere Hardware-/Display-Unterstuetzung.
-echo
-read -rp "Mainline-Kernel (linuxPackages_latest) statt LTS verwenden? [J/n]: " KL
-case "$KL" in [nN]*) KERNEL_LATEST=0 ;; *) KERNEL_LATEST=1 ;; esac
-
 # Optional: dGPU an vfio-pci binden fuer D3cold-Stromsparen — nur wenn oben eine D3cold-faehige
 # dGPU erkannt wurde (sonst erscheint die Frage gar nicht).
 VFIO_D3COLD=0
 if [ -n "$DGPU_GPU_ID" ]; then
   echo
   echo "Dedizierte GPU erkannt: $DGPU_ADDR  ($DGPU_GPU_ID${DGPU_AUDIO_ID:+ + Audio $DGPU_AUDIO_ID})  — D3cold-faehig (_PR3 am Parent-Port)."
-  echo "An vfio-pci binden spart im Leerlauf Strom (Slot wird stromlos), macht die GPU aber fuer den"
-  echo "HOST unbrauchbar (kein CUDA, kein Host-Gaming — nur Passthrough an eine VM)."
+  echo
+  echo "An vfio-pci binden heisst: der Slot wird im Leerlauf komplett stromlos (echtes D3cold)"
+  echo "— auf Hybrid-Laptops spuerbar mehr Akku, da der Desktop ohnehin auf der iGPU laeuft."
+  echo "WOZU man das will:  (a) Vorbereitung fuer GPU-Passthrough an eine VM"
+  echo "                        (z. B. die VM-Suite-Extension, s. docs/README-payload.md),"
+  echo "                    (b) reines Stromsparen, wenn die dGPU nie gebraucht wird."
+  echo "PREIS: die GPU ist fuer den HOST unbrauchbar (kein CUDA, kein Host-Gaming)."
+  echo "DRITTER WEG (ohne vfio, spaeter nachruestbar): proprietaerer Treiber + RTD3 ="
+  echo "gleiches D3cold MIT Host-Nutzbarkeit — Anleitung: docs/troubleshooting.md, E."
   read -rp "dGPU an vfio-pci binden? [j/N]: " VF
   case "$VF" in [jJyY]*) VFIO_D3COLD=1 ;; *) VFIO_D3COLD=0 ;; esac
 fi
@@ -357,71 +380,30 @@ cd "$REPO"
 git init -q 2>/dev/null || true
 printf 'result\nresult-*\n*.swp\n' > .gitignore
 
-cat > flake.nix <<'NIXEOF'
+# ── Basis-Payload einspielen: alle zentral gepflegten Dateien 1:1 aus files/ ──
+# (Module, update-all.sh, USBGuard-Werkzeuge, check-vfio.sh, Doku, Auto-Discovery-
+# flake.nix.) Immer ALLE — Module sind Infrastruktur; ob eines wirkt, entscheidet
+# allein der IMPORTS-Block der Host-Config (die J/n-Prompts oben). Exec-Bits
+# reisen mit. Architektur/Update-Fluss: docs/README-payload.md (liegt danach im Repo).
+cp -r "$SCRIPT_DIR/files/." .
+
+# payload-sources.conf: verbindet das neue Repo mit dem zentralen Basis-Payload —
+# update-all.sh (Abschnitt 0b) zieht Updates kuenftig von dort, nach Diff + Gate.
+PL_URL="$(git -C "$SCRIPT_DIR" remote get-url origin 2>/dev/null || true)"
 {
-  description = "NixOS — multi-host + VMs, auto-discovered aus hosts/ (Baustein A)";
-  inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
-    disko = { url = "github:nix-community/disko/latest"; inputs.nixpkgs.follows = "nixpkgs"; };
-  };
+  printf '# payload-sources.conf — Quellen fuer update-all.sh, Abschnitt 0b.\n'
+  printf '# Format: name=url-oder-pfad[#ref] · Pinning/Spiegel: docs/README-payload.md\n'
+  if [ -n "$PL_URL" ]; then
+    printf 'basis=%s\n' "$PL_URL"
+  else
+    printf '# basis=<url-des-installer-repos>   # nicht ermittelbar (kein git-Klon?) — bitte eintragen\n'
+  fi
+  printf '# extensions=<url-nach-kauf>#<tag>\n'
+} > payload-sources.conf
 
-  # ───────────────────────────────────────────────────────────────────────────
-  # Auto-Discovery (Baustein A): Die nixosConfigurations werden aus hosts/
-  # abgeleitet — ein neuer Host oder eine neue VM ist NUR ein neuer Ordner,
-  # kein Flake-Edit mehr. Konvention:
-  #
-  #   hosts/<name>/configuration.nix           Pflicht. Ordner OHNE diese Datei
-  #                                            werden ignoriert (erlaubt
-  #                                            schrittweises Onboarding, z. B.
-  #                                            erst DETECTED-HARDWARE.txt ablegen).
-  #   hosts/<name>/hardware-configuration.nix  vorhanden = PHYSISCHER Host:
-  #                                            disko-Modul + disk.nix +
-  #                                            hardware-configuration.nix werden
-  #                                            automatisch mit eingebunden.
-  #                                            disk.nix MUSS dann existieren —
-  #                                            fehlt sie, bricht die Evaluation
-  #                                            laut (gewollt, kein stiller Host
-  #                                            ohne Disk-Layout).
-  #   ohne hardware-configuration.nix          = VM: nur configuration.nix
-  #                                            (Image via nixos-rebuild
-  #                                            build-image, s. deploy-Skripte).
-  #
-  # devstation-Onboarding = hosts/devstation/ mit den drei Dateien anlegen
-  # (hardware-configuration.nix via `nixos-generate-config`, disk.nix als
-  # disko-Layout des Geraets, configuration.nix nach devbook-Muster) — fertig,
-  # das Flake findet den Host von selbst. WICHTIG wie immer: `git add -A`,
-  # sonst sind neue Dateien fuer die Flake-Evaluation unsichtbar.
-  # ───────────────────────────────────────────────────────────────────────────
-  outputs = { self, nixpkgs, disko, ... }:
-    let
-      lib = nixpkgs.lib;
-      hostsDir = ./hosts;
-
-      # Alle Unterordner von hosts/, die eine configuration.nix tragen.
-      hostNames = lib.filter
-        (name: builtins.pathExists (hostsDir + "/${name}/configuration.nix"))
-        (lib.attrNames
-          (lib.filterAttrs (_: type: type == "directory") (builtins.readDir hostsDir)));
-
-      # Physischer Host <=> hardware-configuration.nix liegt im Ordner.
-      isPhysical = name:
-        builtins.pathExists (hostsDir + "/${name}/hardware-configuration.nix");
-
-      mkHost = name: nixpkgs.lib.nixosSystem {
-        system = "x86_64-linux";
-        modules =
-          lib.optionals (isPhysical name) [
-            disko.nixosModules.disko
-            (hostsDir + "/${name}/disk.nix")
-            (hostsDir + "/${name}/hardware-configuration.nix")
-          ]
-          ++ [ (hostsDir + "/${name}/configuration.nix") ];
-      };
-    in {
-      nixosConfigurations = lib.genAttrs hostNames mkHost;
-    };
-}
-NIXEOF
+# flake.nix kommt aus dem Basis-Payload (files/): Auto-Discovery — neue Hosts
+# (hosts/<name>/ mit hardware-configuration.nix + disk.nix) und VM-Gaeste werden
+# ohne Flake-Aenderung erkannt; disko wird fuer physische Hosts automatisch verdrahtet.
 
 # Wiederkehrender btrfs-Root (5 Subvolumes). Nix ist whitespace-unempfindlich,
 # daher als Variable wiederverwendbar.
@@ -569,51 +551,10 @@ esac
 XKBOPT=""
 case "$XKB" in *,*) XKBOPT='  services.xserver.xkb.options = "grp:alt_shift_toggle";' ;; esac
 
-# Kernel-Zeile fuer modules/desktop.nix — aus der Frage oben (KERNEL_LATEST, Default J).
-# Kommt fertig gebaut aus dem Binary-Cache; Abwahl pro Host spaeter via
-# boot.kernelPackages = lib.mkForce pkgs.linuxPackages; in hosts/<host>/configuration.nix.
-if [ "$KERNEL_LATEST" = "1" ]; then
-  KERNELLINE='  boot.kernelPackages = pkgs.linuxPackages_latest;   # Mainline — Default (MST/DSC-Fix, s. aufbau.md §9)'
-else
-  KERNELLINE='  boot.kernelPackages = pkgs.linuxPackages;   # LTS — bewusste Abwahl des Mainline-Defaults (Frage im Installer)'
-fi
-
-# ── Geteilter Desktop-Stack als generisches Modul (host-unabhaengig) ──────────
-# Regionale Werte (Zeitzone/Locale/Tastatur) werden hier fixiert -> konsistent ueber
-# alle Hosts. Spaeter aus jeder Host-Config importierbar (modulares Multi-Host-Setup).
-mkdir -p modules
-cat > modules/desktop.nix <<EOF
-# modules/desktop.nix — geteilte Desktop-Basis (generisch, host-unabhaengig).
-# Vom Installer erzeugt. Hostname/User/stateVersion stehen pro Host in hosts/<host>/.
-{ pkgs, ... }:
-{
-  boot.loader.systemd-boot.enable = true;
-  boot.loader.systemd-boot.configurationLimit = 10;   # ESP nicht mit alten Generationen volllaufen lassen
-  boot.loader.efi.canTouchEfiVariables = true;
-  boot.initrd.systemd.enable = true;
-$KERNELLINE
-
-  hardware.enableRedistributableFirmware = true;   # WLAN-/GPU-Firmware
-  hardware.graphics.enable = true;                 # iGPU / Desktop
-  zramSwap.enable = true;                          # komprimierter RAM-Swap (hibernate-sicher)
-  # CPU-Microcode (intel/amd) setzt hardware-configuration.nix automatisch passend.
-
-  networking.networkmanager.enable = true;
-
-  time.timeZone = "$TZ";
-  i18n.defaultLocale = "$LOC";
-  services.xserver.xkb.layout = "$XKB";
-$XKBOPT
-  console.useXkbConfig = true;
-
-  services.xserver.enable = true;
-  services.displayManager.sddm.enable = true;
-  services.desktopManager.plasma6.enable = true;
-
-  nix.settings.experimental-features = [ "nix-command" "flakes" ];
-  environment.systemPackages = with pkgs; [ vim git ];
-}
-EOF
+# modules/desktop.nix kommt aus dem Basis-Payload (files/). Die Prompt-Antworten
+# (Zeitzone/Locale/Tastatur/Kernel) landen unten als NORMALE Zuweisungen in der
+# Host-Config — sie uebersteuern die mkDefault-Vorschlagswerte des Moduls
+# (Drei-Ebenen-Regel: docs/nixos-cheatsheet.md §13).
 
 # ── Schlanke Host-Config: importiert das/die Modul(e) + nur das Host-Spezifische ──
 # host-updates.nix wird nur eingehaengt, wenn oben danach gefragt wurde (HOSTUPDATES=1).
@@ -637,7 +578,7 @@ fi
 # usbguard-CLI kommt fluechtig aus nixpkgs (kein Eingriff ins Live-System). Schlaegt
 # das fehl (offline, keine allow-Regeln): Modul bleibt trotzdem eingehaengt, USBGuard
 # bleibt AUS (konservativer Modul-Default ohne rulesFile) -> nach dem ersten Boot
-# nachziehen mit 'bash usbguard-sync.sh --init' aus dem Referenz-Repo.
+# nachziehen mit 'bash usbguard-sync.sh --init' (liegt via files/ bereits im Repo).
 # Bei DRY_RUN wird die Erzeugung uebersprungen (dry-run ruft bewusst kein sudo).
 HARDENING_CONFIG=""
 if [ "$HARDENING" = "1" ]; then
@@ -660,7 +601,7 @@ if [ "$HARDENING" = "1" ]; then
        && grep -q '^allow ' "hosts/$HOST/usbguard-rules.conf"; then
       HARDENING_CONFIG="
   # Gepinnte USBGuard-Whitelist dieses Geraets (SYS.2.3.A14) — Pflege NUR ueber diese
-  # Datei (Workflow: usbguard-sync.sh; Doku: README-hardening.md im Referenz-Repo).
+  # Datei (Workflow: usbguard-sync.sh; Doku: docs/README-hardening.md).
   hardening.usbguard.rulesFile = ./usbguard-rules.conf;"
       echo "  -> hosts/$HOST/usbguard-rules.conf erzeugt ($(grep -c '^allow ' "hosts/$HOST/usbguard-rules.conf") Regeln) — USBGuard aktiv ab dem ersten Boot."
     else
@@ -692,13 +633,22 @@ if [ "$VFIO_D3COLD" = "1" ]; then
   boot.blacklistedKernelModules = $_bl;   # Fallback: bleibt treiberlos, falls vfio-pci nicht greift"
 fi
 cat > "hosts/$HOST/configuration.nix" <<EOF
-{ ... }:
+{ pkgs, ... }:
 {
   imports = [
 $IMPORTS
   ];
 
   networking.hostName = "$HOST";
+
+  # Personalisierte Vorgaben aus den Installer-Prompts — uebersteuern die
+  # mkDefault-Vorschlagswerte in modules/desktop.nix (normale Zuweisung genuegt;
+  # Drei-Ebenen-Regel: docs/nixos-cheatsheet.md §13).
+  time.timeZone = "$TZ";
+  i18n.defaultLocale = "$LOC";
+  services.xserver.xkb.layout = "$XKB";
+$XKBOPT
+$KERNEL_LINE
 $VFIO_CONFIG$HARDENING_CONFIG
   users.users.$USER_ = {
     isNormalUser = true;
@@ -712,774 +662,14 @@ $VFIO_CONFIG$HARDENING_CONFIG
 }
 EOF
 
-# ── Optional: Update-Erinnerung (Icon + stuendlicher Check) + update-all.sh ──────
-# Nur wenn oben danach gefragt wurde. host-updates.nix ist generisch (haengt nur am Repo
-# unter ~/nixos-config) und wurde bereits in die Host-Config eingehaengt (IMPORTS).
-if [ "$HOSTUPDATES" = "1" ]; then
-cat > modules/host-updates.nix <<'NIXEOF'
-# modules/host-updates.nix
-# ─────────────────────────────────────────────────────────────────────────────
-# Generische Host-Wartung: erinnert an neue nixpkgs-Staende, bietet einen
-# Ein-Klick-Weg, alles zu aktualisieren, und bringt fwupd fuer Firmware/BIOS mit.
-# Haengt NUR am Repo unter ~/nixos-config (kein dev-VM- oder Hardware-Bezug)
-# -> jeder Host kann es einzeln importieren.
-#
-# Drei abgestimmte Teile: Erinnerung (stuendlicher User-Timer; Snooze = Timer stoppen
-# + transienter systemd-Wecker, KEIN State-File) -> Knopf (Desktop-Icon) -> ein Befehl
-# (update-all.sh: Flake bumpen + Host + alle VMs + Firmware).
-# Bewusst KEIN system.autoUpgrade: nichts aktualisiert unbeaufsichtigt.
-{ lib, pkgs, ... }:
-let
-  # GUI-Launcher fuer Updates: oeffnet konsole und laesst update-all.sh laufen (Fenster bleibt offen).
-  # Wird vom Update-Icon UND von der "Jetzt aktualisieren"-Benachrichtigung aufgerufen.
-  nixos-update-gui = pkgs.writeShellScriptBin "nixos-update-gui" ''
-    exec konsole -e bash -lc 'cd "$HOME/nixos-config" && bash update-all.sh; echo; read -rp "Fertig — Enter schliesst das Fenster. "'
-  '';
+# host-updates.nix + update-all.sh kommen aus dem Basis-Payload (files/) — die
+# Update-Erinnerung wirkt nur, wenn 'J' oben das Modul in IMPORTS eingehaengt hat.
 
-  # Hintergrund-Check: vergleicht den gepinnten nixpkgs-Stand (flake.lock) mit dem Upstream-Branch.
-  # Gibt es Neues -> Desktop-Benachrichtigung mit Snooze-Knoepfen. Snooze laeuft rein ueber
-  # systemd (Stunden-Timer stoppen + transienter --on-calendar-Wecker, kein State-File);
-  # ein aktiver Snooze ist via 'systemctl --user list-timers' sichtbar.
-  # Vom systemd-User-Timer (stuendlich) ausgeloest. Tut nichts ohne grafische Sitzung.
-  nixos-update-check = pkgs.writeShellScript "nixos-update-check" ''
-    set -uo pipefail
-    # pkgs.systemd: systemd-run/systemctl fuer den Snooze-Wecker garantiert im PATH.
-    export PATH=${lib.makeBinPath [ pkgs.git pkgs.jq pkgs.libnotify pkgs.coreutils pkgs.systemd ]}:/run/current-system/sw/bin:$PATH
+# modules/vfio.nix kommt aus dem Basis-Payload (files/) — es wirkt nur, wenn die
+# Host-Config host.passthroughIds setzt (VFIO_CONFIG oben; sonst reiner No-op).
 
-    REPO="$HOME/nixos-config"
-    LOCK="$REPO/flake.lock"
-    [ -f "$LOCK" ] || exit 0
-    # (Kein Snooze-Gate mehr: waehrend eines Snooze ist der Stunden-Timer selbst gestoppt,
-    #  dieser Check laeuft dann schlicht nicht. Sichten/Aufheben: troubleshooting.md, D.)
-
-    # Gepinnten nixpkgs-Branch aus flake.lock lesen (robust ueber den root-Input). Der Branch
-    # aendert sich durch einen Bump nicht -> bleibt die richtige Quelle fuer den ls-remote unten.
-    node=$(jq -r '.nodes.root.inputs.nixpkgs // "nixpkgs"' "$LOCK")
-    ref=$(jq -r --arg n "$node" '.nodes[$n].original.ref // "nixos-26.05"' "$LOCK")
-
-    # Vergleichsbasis ist der Stand des LAUFENDEN Systems (nixos-version), NICHT flake.lock auf der
-    # Platte: ein halbfertiger 'nix flake update' (flake.lock gebumpt, aber Host noch nicht gebaut)
-    # wuerde sonst faelschlich als "kein Update" gewertet -> die Erinnerung verstummt dauerhaft.
-    # nixpkgsRevision = die nixpkgs-Revision, mit der der laufende Host gebaut wurde.
-    localrev=$(nixos-version --json 2>/dev/null | jq -r '.nixpkgsRevision // ""')
-    # Fallback nur, wenn nixos-version keine Revision liefert (z. B. dirty build): flake.lock auf
-    # der Platte. Den verwaisten-Bump-Fall faengt dann update-all.sh per Rollback ab (Kombi-Loesung).
-    [ -n "$localrev" ] || localrev=$(jq -r --arg n "$node" '.nodes[$n].locked.rev // ""' "$LOCK")
-    [ -n "$localrev" ] || exit 0
-
-    # Upstream-HEAD des Branches (leichtgewichtig; offline/Fehler/Timeout -> still raus).
-    upstream=$(timeout 20 git ls-remote https://github.com/NixOS/nixpkgs "refs/heads/$ref" 2>/dev/null | cut -f1)
-    [ -n "$upstream" ] || exit 0
-    [ "$localrev" = "$upstream" ] && exit 0
-
-    # Es gibt Neues -> benachrichtigen und bis zu 1 h auf eine Aktion warten.
-    rc=0
-    choice=$(timeout 3600 notify-send \
-      --app-name="NixOS" --icon=system-software-update --urgency=normal --expire-time=0 \
-      --action=now="Jetzt aktualisieren" \
-      --action=1h="In 1 Stunde" \
-      --action=8h="In 8 Stunden" \
-      --action=1d="Morgen" \
-      "NixOS-Updates verfuegbar" \
-      "Der nixpkgs-Kanal ($ref) ist weitergewandert. Jetzt aktualisieren oder spaeter erinnern lassen." \
-      2>/dev/null) || rc=$?
-
-    # rc=124 -> Timeout: niemand hat reagiert -> NICHTS tun; der Stunden-Timer laeuft weiter
-    #   und erinnert beim naechsten Takt erneut. (Frueher galt Timeout als "morgen" — zusammen
-    #   mit der dann toten Zombie-Benachrichtigung, deren Klicks ins Leere laufen, die Ursache
-    #   fuer tagelanges Schweigen.)
-    # rc weder 0 noch 124 -> notify-send-Fehler (kein Daemon/keine GUI) -> ebenfalls nichts
-    #   tun; der naechste Stundenlauf versucht es neu.
-    [ "$rc" -eq 0 ] || exit 0
-
-    # Snooze rein ueber systemd — fuer JEDE Dauer (1 h / 8 h / morgen) derselbe Weg, nur mit
-    # anderer Weckzeit. Reihenfolge ist Wecker-FIRST: erst den transienten Wecker setzen,
-    # ERST WENN das geklappt hat, den Stunden-Timer stoppen. Schlaegt systemd-run fehl,
-    # bleibt der Timer an -> die Erinnerung kommt schlimmstenfalls zu frueh, nie gar nicht.
-    # --on-calendar statt --on-active: die monotone Uhr steht im Suspend still — ein "+8 h"-
-    #   Wecker wuerde um jede Deckel-zu-Zeit verrutschen. Kalender-Timer feuern nach dem
-    #   Aufwachen sofort nach, wenn die Weckzeit im Schlaf verstrichen ist.
-    # Reboot/Logout raeumt transiente User-Units ab; der Stunden-Timer startet beim naechsten
-    #   Login via timers.target von selbst -> Snooze vergessen heisst nur "Erinnerung kommt
-    #   zu frueh", nie "kommt nicht mehr" (gutartige Degradation).
-    snooze() {
-      wake=$(date -d "$1" '+%Y-%m-%d %H:%M:%S') || return 0
-      systemctl --user stop nixos-update-snooze.timer 2>/dev/null || true   # Doppel-Snooze raeumen
-      systemctl --user reset-failed nixos-update-snooze.service 2>/dev/null || true
-      if systemd-run --user --collect --unit=nixos-update-snooze --on-calendar="$wake" \
-           systemctl --user start nixos-update-check.timer nixos-update-check.service
-      then
-        systemctl --user stop nixos-update-check.timer
-      fi
-    }
-
-    case "$choice" in
-      now|*"Jetzt"*)    exec ${nixos-update-gui}/bin/nixos-update-gui ;;
-      1h|*"1 Stunde"*)  snooze "+1 hour" ;;
-      8h|*"8 Stunden"*) snooze "+8 hours" ;;
-      1d|*"Morgen"*)    snooze "+24 hours" ;;
-      *)                snooze "+24 hours" ;;   # aktiv weggewischt -> bewusst bis morgen
-    esac
-  '';
-in
-{
-  environment.systemPackages = with pkgs; [
-    libnotify          # notify-send im PATH (fuer Debugging; der Timer bringt es selbst mit)
-    nvd                # lesbare Closure-Diffs; update-all.sh nutzt es (Fallback: nix store diff-closures)
-    nixos-update-gui
-    # Desktop-Icon: Update-Knopf -> oeffnet konsole und faehrt update-all.sh
-    # (Flake bumpen + Host + alle konfigurierten VMs). sudo-Passwort gibst du im Terminal ein.
-    (makeDesktopItem {
-      name = "nixos-update-all";
-      desktopName = "NixOS aktualisieren";
-      comment = "Flake bumpen, Host und alle konfigurierten VMs neu bauen";
-      exec = "nixos-update-gui";
-      icon = "system-software-update";
-      categories = [ "System" ];
-      terminal = false;
-    })
-  ];
-
-  # ===== Firmware/BIOS via LVFS (fwupd) =====
-  # Daemon + fwupdmgr; Abschnitt 5 in update-all.sh nutzt das (pruefen -> [j/N]-Gate ->
-  # anwenden; ein bestaetigtes BIOS-Update rebootet direkt). Generisch unbedenklich:
-  # Geraete ohne LVFS-Angebot (z. B. Consumer-Boards der devstation) melden schlicht
-  # nichts -> der Skript-Abschnitt ueberspringt dann still. Nebenwirkung: auch Plasma
-  # Discover zeigt Firmware-Updates an. LVFS hinkt Dell gelegentlich eine Version
-  # hinterher — bei Security-BIOS lohnt der Gegencheck auf dell.com.
-  services.fwupd.enable = true;
-
-  # ===== Update-Benachrichtigung (stuendlicher Check, Snooze, Desktop-Notification) =====
-  # Bewusst KEIN system.autoUpgrade: nichts aktualisiert unbeaufsichtigt (insb. die VM darf das nie —
-  # ein Redeploy killt eine laufende Zed-Sitzung). Stattdessen: erinnern -> du drueckst den Knopf.
-  systemd.user.services.nixos-update-check = {
-    description = "Auf NixOS-Updates pruefen und benachrichtigen (mit Snooze)";
-    serviceConfig = {
-      Type = "oneshot";
-      ExecStart = "${nixos-update-check}";
-    };
-  };
-  systemd.user.timers.nixos-update-check = {
-    description = "Stuendlicher Check auf NixOS-Updates";
-    wantedBy = [ "timers.target" ];
-    timerConfig = {
-      OnCalendar = "hourly";
-      Persistent = true;            # verpasste Laeufe nach Aufwachen/Boot nachholen (= auch "beim Start")
-      RandomizedDelaySec = "10m";
-    };
-  };
-}
-NIXEOF
-
-# SNAPSHOT der kanonischen update-all.sh aus dem nixos-config-Repo (Stand 2026-07-13).
-# Gepflegt wird das Skript DORT — bei inhaltlichen Aenderungen diesen Block nachziehen.
-cat > update-all.sh <<'SHEOF'
-#!/usr/bin/env bash
-#
-# update-all.sh — bumpt den Flake und aktualisiert ALLES auf einen Schlag:
-#   1) nix flake update   (hebt nixpkgs & Co. -> neues Zed, Plasma, claude-code, Kernel …)
-#   2) Host erst BAUEN (ohne Aktivierung) -> Paket-Diff zeigen -> nachfragen -> aktivieren
-#      (bei 'n' oder Fehler wird der flake.lock-Bump verworfen -> kein Drift Repo <-> System)
-#  2b) Smoke-Checks direkt nach der Aktivierung: systemd-Zustand + alle check-*.sh im
-#      Repo-Root (warnen nur, brechen nie ab — Rollback bleibt bewusste Entscheidung)
-#   3) jede konfigurierte VM neu deployen (alle vorhandenen deploy-*-vm.sh; fragt vorher)
-#   4) flake.lock committen (als DU, nicht root; Commit-Body traegt den Paket-Diff)
-#   5) Firmware/BIOS via fwupd/LVFS: pruefen -> [j/N]-Gate -> anwenden (Bestaetigung = REBOOT)
-#
-# Jeder Lauf (ausser --dry-run) wird komplett mitgeschnitten: Session-Log unter
-#   ~/.local/state/update-all/<Datum>_<Host>.log  (Retention: die letzten 20 Laeufe)
-#
-# Aufruf (irgendwo im Repo):  bash update-all.sh [--host-only] [--dry-run]
-#   --host-only : nur Flake + Host (inkl. Smoke-Checks); VMs NICHT anfassen und KEINE
-#                 Firmware (kein Reboot-Risiko, z. B. waehrend du in der dev-VM arbeitest)
-#   --dry-run   : nur zeigen, was es taete; laeuft als einziger Modus auch ohne TTY
-#
-# Jeder andere Lauf braucht ein interaktives Terminal — jeder Schritt hat sein [j/n]-Gate.
-# ('--yes' 2026-07-12 entfernt: kein Aufrufer, loeste "unbeaufsichtigt" am sudo-Prompt nie
-#  ein und haette am BIOS-Reboot in Abschnitt 5 eine gefaehrliche Doppelsemantik gebraucht.)
-#
-set -euo pipefail
-
-# ---------------------------------------------------------------------------
-# Flags
-# ---------------------------------------------------------------------------
-DRY_RUN=0; HOST_ONLY=0
-for arg in "$@"; do
-  case "$arg" in
-    --host-only) HOST_ONLY=1 ;;
-    --dry-run)   DRY_RUN=1 ;;
-    -h|--help)   sed -n '2,23p' "$0"; exit 0 ;;
-    *) printf 'Unbekanntes Argument: %s\n' "$arg" >&2; exit 2 ;;
-  esac
-done
-
-info() { printf '\033[1;34m[*]\033[0m %s\n' "$*"; }
-ok()   { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*"; }
-die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
-run()  { if [ "$DRY_RUN" -eq 1 ]; then printf '   \033[2m(dry-run)\033[0m %s\n' "$*"; else "$@"; fi; }
-
-# Gates lesen von stdin -> ohne TTY frueh und deutlich scheitern, statt spaeter mitten im
-# Lauf an einem sudo ohne Terminal zu stolpern. Einzige Ausnahme: --dry-run liest nichts.
-if [ "$DRY_RUN" -eq 0 ] && [ ! -t 0 ]; then
-  die "Interaktives Terminal erforderlich — nur --dry-run laeuft ohne TTY."
-fi
-
-# ---------------------------------------------------------------------------
-# Ins Repo-Wurzelverzeichnis (Skript darf aus jedem Unterordner laufen)
-# ---------------------------------------------------------------------------
-if [ ! -f flake.nix ]; then
-  root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-  [ -n "$root" ] && cd "$root"
-fi
-[ -f flake.nix ] || die "Keine flake.nix gefunden — bitte im Repo (oder Repo-Root) ausfuehren."
-command -v nixos-rebuild >/dev/null 2>&1 || die "nixos-rebuild nicht gefunden (kein NixOS-Host?)."
-
-HOST="$(hostname -s 2>/dev/null || cat /etc/hostname 2>/dev/null)"
-[ -n "$HOST" ] || die "Hostnamen nicht ermittelbar (weder 'hostname -s' noch /etc/hostname)."
-[ -d "hosts/${HOST}" ] || warn "hosts/${HOST} nicht gefunden — ist .#${HOST} der richtige Flake-Output?"
-REPO_ROOT="$PWD"
-
-# ---------------------------------------------------------------------------
-# Session-Log: kompletter Lauf (Diff, Prompts samt Antworten, VM-Deploys, Firmware,
-# vor allem: FEHLER und Abbrueche — der forensisch wichtigste Fall) nach
-# ~/.local/state/update-all/. /home liegt AUSSERHALB der NixOS-Generationen: ein
-# Rollback (--rollback/Bootmenue) laesst die Logs unangetastet. tee schreibt
-# zeilenweise durch -> auch beim Firmware-Reboot (Abschnitt 5) ist das Log bis
-# zuletzt vollstaendig. ANSI-Farben bleiben drin (lesen mit: less -R).
-# ---------------------------------------------------------------------------
-LOGFILE=""; SMOKE_WARN=0; DIFF_OUT=""; pre_failed=""
-if [ "$DRY_RUN" -eq 0 ]; then
-  LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/update-all"
-  mkdir -p "$LOGDIR"
-  LOGFILE="$LOGDIR/$(date +%Y-%m-%d_%H%M%S)_${HOST}.log"
-  exec > >(tee "$LOGFILE") 2>&1
-  # Retention: nur die letzten 20 Laeufe behalten (Dateinamen sind selbst erzeugt
-  # und newline-frei; find statt ls haelt shellcheck sauber).
-  find "$LOGDIR" -maxdepth 1 -name '*.log' -printf '%T@\t%p\n' 2>/dev/null \
-    | sort -rn | tail -n +21 | cut -f2- | xargs -r -d '\n' rm -f --
-  info "Session-Log: $LOGFILE"
-  # Vorzustand festhalten: waren Units schon VOR dem Update kaputt? (leer = nein)
-  # -> macht in 2b "neu kaputt" von "war schon kaputt" unterscheidbar.
-  pre_failed=$(systemctl --failed --no-legend 2>/dev/null || true)
-  if [ -n "$pre_failed" ]; then
-    warn "Schon VOR dem Update fehlgeschlagene Units (Einordnung fuer die Smoke-Checks):"
-    printf '%s\n' "$pre_failed"
-  fi
-fi
-
-# setuid-sudo sicherstellen: im Notification-/User-Service-Kontext (Update-Icon,
-# "Jetzt aktualisieren"-Knopf aus modules/host-updates.nix) liegt /run/wrappers/bin
-# sonst nicht vorn im PATH -> sudo traefe die nicht-setuid-Kopie und bricht ab.
-export PATH="/run/wrappers/bin:$PATH"
-
-# Verwaister-Bump-Schutz (Kombi-Loesung mit dem Update-Check in host-updates.nix):
-# stirbt das Skript zwischen Bump und erfolgreichem Switch (Strg-C, Fenster zu,
-# unerwarteter set-e-Abbruch), wird der flake.lock-Bump verworfen -> kein
-# gebumptes-aber-nicht-gebautes flake.lock. Die regulaeren Pfade (Gate-'n',
-# Build-/Switch-Fehler) rufen revert_lock selbst und stellen den Trap still.
-LOCK_BUMPED=0; UPDATE_DONE=0
-cleanup() {
-  if [ "$LOCK_BUMPED" -eq 1 ] && [ "$UPDATE_DONE" -eq 0 ]; then
-    warn "Abbruch vor Abschluss — verwerfe den flake.lock-Bump."
-    git -C "$REPO_ROOT" checkout -- flake.lock 2>/dev/null || true
-  fi
-}
-trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
-
-# ---------------------------------------------------------------------------
-# 1) Flake-Inputs bumpen
-# ---------------------------------------------------------------------------
-info "Aktualisiere Flake-Inputs (nix flake update)…"
-run nix flake update
-if [ "$DRY_RUN" -eq 0 ]; then LOCK_BUMPED=1; fi
-
-# Transparenz: zeigen, was sich am Lock geaendert hat.
-if [ "$DRY_RUN" -eq 0 ]; then
-  if [ -n "$(git status --porcelain -- flake.lock 2>/dev/null)" ]; then
-    info "Aenderungen an flake.lock:"
-    git --no-pager diff --stat -- flake.lock || true
-  else
-    ok "flake.lock unveraendert — Inputs schon aktuell."
-  fi
-fi
-
-# ---------------------------------------------------------------------------
-# 2) Host: erst BAUEN (unprivilegiert, ohne Aktivierung) -> Paket-Diff -> aktivieren
-#    'nixos-rebuild build' legt ./result an (gitignored) und braucht KEIN sudo — das
-#    Passwort kommt erst bei der Aktivierung. So sind die realen Paketaenderungen
-#    VOR dem Umschalten sichtbar, und ein Abbruch ist folgenlos.
-#    Abbruch ('n') oder Fehler verwirft den flake.lock-Bump -> Repo bleibt == laufendes
-#    System (kein Drift); der naechste Lauf holt ohnehin einen frischen Bump.
-#    Diff-Werkzeug: nvd, wenn vorhanden (kommt via host-updates.nix; gruppierte
-#    Ausgabe, ausgerichtete Versionsspruenge, Summenzeile) — sonst eingebautes
-#    'nix store diff-closures', damit das Skript auch auf Hosts ohne das Modul
-#    lauffaehig bleibt. Der Diff wird mitgeschnitten und in Abschnitt 4 in den
-#    flake.lock-Commit-Body gelegt (git log = Update-Chronik, offsite nach push).
-#    (VMs bewusst ohne Diff: near-stateless -> kein sinnvoller Vorzustand ohne Statefile.)
-# ---------------------------------------------------------------------------
-revert_lock() {  # flake.lock auf den committeten Stand zuruecksetzen (kein Drift)
-  if git checkout -- flake.lock 2>/dev/null; then
-    ok "flake.lock auf den committeten Stand zurueckgesetzt — kein Drift."
-  else
-    warn "flake.lock nicht zurueckgesetzt (nicht getrackt?) — bitte manuell pruefen."
-  fi
-  LOCK_BUMPED=0   # Trap still: der Bump ist behandelt
-}
-
-if [ "$DRY_RUN" -eq 1 ]; then
-  info "(dry-run) Wuerde Host bauen (nixos-rebuild build), Closure-Diff zeigen, dann aktivieren."
-else
-  info "Baue neues Host-System (ohne Aktivierung; sudo folgt erst bei der Aktivierung)…"
-  if ! nixos-rebuild build --flake ".#${HOST}"; then
-    warn "Host-Build fehlgeschlagen — verwerfe den flake.lock-Bump."
-    revert_lock
-    die "Abbruch: Host-Build fehlgeschlagen (System und Repo unveraendert)."
-  fi
-
-  if [ "$(readlink -f /run/current-system)" = "$(readlink -f ./result)" ]; then
-    ok "Host-Closure unveraendert — keine Paketaenderungen (nur Input-Bump im Lock)."
-    DIFF_OUT="(Closure unveraendert — keine Paketaenderungen, nur Input-Bump im Lock.)"
-  else
-    info "Paketaenderungen am Host (aktiv -> neu):"
-    # Capture statt Direktausgabe: derselbe Text geht 1:1 in den Commit-Body (Abschnitt 4)
-    # und ins Session-Log. Nebeneffekt gewollt: kein TTY fuer das Diff-Tool -> farbfreier,
-    # sauber archivierbarer Text.
-    if command -v nvd >/dev/null 2>&1; then
-      DIFF_OUT=$(nvd diff /run/current-system ./result 2>&1 || true)
-    else
-      DIFF_OUT=$(nix store diff-closures /run/current-system ./result 2>&1 || true)
-    fi
-    printf '%s\n' "$DIFF_OUT"
-
-    # Proceed-Gate (TTY ist oben garantiert). Bei 'n': Lock verwerfen, NICHT aktivieren.
-    read -rp "$(printf '\033[1;34m[?]\033[0m Host jetzt auf diesen Stand aktivieren? [J/n]: ')" ans || ans=""
-    case "$ans" in
-      [nN]*)
-        warn "Aktivierung abgebrochen — verwerfe den flake.lock-Bump."
-        revert_lock
-        exit 0
-        ;;
-    esac
-  fi
-fi
-
-info "Aktiviere Host: sudo nixos-rebuild switch --flake .#${HOST}…"
-if ! run sudo nixos-rebuild switch --flake ".#${HOST}"; then
-  warn "Aktivierung fehlgeschlagen — verwerfe den flake.lock-Bump."
-  revert_lock
-  die "Abbruch: 'nixos-rebuild switch' fehlgeschlagen."
-fi
-ok "Host aktualisiert."
-UPDATE_DONE=1   # ab hier ist der Bump gebaut -> Trap darf ihn nicht mehr verwerfen
-# (./result bleibt liegen — gitignored; der naechste Build/VM-Deploy ueberschreibt es.)
-
-# ---------------------------------------------------------------------------
-# 2b) Smoke-Checks — direkt nach der Aktivierung, bewusst VOR den VM-Gates: ist
-#     libvirt oder die vfio-Bindung nach einem Kernel-Update gerissen, soll das als
-#     klare Warnung auf dem Tisch liegen, BEVOR an den VM-Gates entschieden wird
-#     (sonst aeussert es sich erst als verwirrender Deploy-Fehler in Abschnitt 3).
-#     Semantik: WARNEN, nie abbrechen, Exit bleibt 0 — der Host ist bereits aktiv,
-#     Rollback ist eine bewusste Entscheidung (Hinweis kommt am Skriptende).
-#     Host-Spezifisches liegt als check-*.sh im Repo-Root (Discovery wie bei den
-#     deploy-*-vm.sh); jeder Check ist selbst-guardend: nicht zustaendig -> still
-#     Exit 0, Warnung -> Exit 1. install.sh liefert bewusst KEINE Checks mit.
-# ---------------------------------------------------------------------------
-if [ "$DRY_RUN" -eq 0 ]; then
-  info "Smoke-Checks (Host-Zustand nach der Aktivierung)…"
-  # Erst die Aktivierungs-Jobs leerlaufen lassen — sofort gemessen waeren noch
-  # startende Services falsche Treffer. 'running' = sauber; alles andere
-  # (degraded, Timeout) -> fehlgeschlagene Units zeigen.
-  state=$(timeout 90 systemctl is-system-running --wait 2>/dev/null || true)
-  if [ "$state" = "running" ]; then
-    ok "systemd: running — keine fehlgeschlagenen Units."
-  else
-    SMOKE_WARN=1
-    warn "systemd meldet '${state:-Timeout nach 90 s}' — fehlgeschlagene Units:"
-    systemctl --failed --no-legend || true
-    [ -n "$pre_failed" ] && warn "(Vorzustand am Log-Anfang — nicht alles davon muss neu sein.)"
-  fi
-  for chk in ./check-*.sh; do
-    [ -e "$chk" ] || continue        # kein Treffer -> Glob bleibt literal
-    if bash "$chk"; then
-      : # Check meldet OK/Nichtzustaendigkeit selbst
-    else
-      SMOKE_WARN=1
-      warn "Smoke-Check meldet Probleme: ${chk#./}"
-    fi
-  done
-  [ "$SMOKE_WARN" -eq 0 ] && ok "Smoke-Checks unauffaellig."
-fi
-
-# ---------------------------------------------------------------------------
-# 3) VMs neu deployen — skaliert ueber die vorhandenen deploy-*-vm.sh
-#    (aktuell dev-vm + browser-vm; ein kuenftiges deploy-ai-vm.sh laeuft automatisch mit)
-# ---------------------------------------------------------------------------
-if [ "$HOST_ONLY" -eq 1 ]; then
-  info "--host-only: VMs werden nicht angefasst."
-else
-  shopt -s nullglob
-  vm_scripts=( deploy-*-vm.sh )
-  shopt -u nullglob
-  if [ "${#vm_scripts[@]}" -eq 0 ]; then
-    info "Keine deploy-*-vm.sh gefunden — keine VMs zu aktualisieren."
-  else
-    info "Gefundene VM-Deploy-Skripte: ${vm_scripts[*]}"
-    for s in "${vm_scripts[@]}"; do
-      vm="${s#deploy-}"; vm="${vm%.sh}"          # deploy-dev-vm.sh -> dev-vm
-      if [ "$DRY_RUN" -eq 0 ]; then
-        read -rp "$(printf '\033[1;34m[?]\033[0m %s jetzt neu deployen? (laufende VM wird kurz gestoppt) [j/N]: ' "$vm")" ans || ans=""
-        case "$ans" in [jJyY]*) ;; *) warn "  uebersprungen: $vm"; continue ;; esac
-      fi
-      info "Deploye ${vm} (bash ${s})…"
-      if run bash "$s"; then
-        ok "${vm} aktualisiert."
-      else
-        warn "${vm}: Deploy FEHLGESCHLAGEN — uebersprungen. Host-Update bleibt aktiv;"
-        warn "       spaeter gezielt erneut:  bash ${s}"
-      fi
-    done
-  fi
-fi
-
-# ---------------------------------------------------------------------------
-# 4) flake.lock committen — als DU (nicht root), damit das Repo dir gehoert
-# ---------------------------------------------------------------------------
-if [ "$DRY_RUN" -eq 0 ] && [ -n "$(git status --porcelain -- flake.lock 2>/dev/null)" ]; then
-  info "Committe flake.lock…"
-  git add flake.lock
-  # Commit-Body traegt den Paket-Diff -> 'git log -- flake.lock' wird zur Update-Chronik,
-  # nach 'git push' auch offsite lesbar (Maschine tot -> von jedem Geraet nachschlagbar).
-  # Hostname in Betreff UND Body: der Diff ist HOST-spezifisch, das Repo traegt spaeter
-  # auch die devstation. Fehlgeschlagene Laeufe committen nie -> dafuer ist das Session-Log da.
-  if git commit -m "update: flake.lock $(date +%Y-%m-%d) (${HOST})" \
-                -m "Paket-Diff auf ${HOST}:" \
-                -m "${DIFF_OUT:-(kein Diff erfasst)}" -- flake.lock; then
-    ok "flake.lock committet (Paket-Diff im Commit-Body). Mit 'git push' wird die Chronik offsite lesbar."
-  else
-    warn "Commit uebersprungen."
-  fi
-elif [ "$DRY_RUN" -eq 0 ]; then
-  info "Kein flake.lock-Diff zu committen."
-fi
-
-# ---------------------------------------------------------------------------
-# 5) Firmware/BIOS via fwupd (LVFS) — BEWUSST der letzte Abschnitt: ein mit 'j'
-#    bestaetigtes Update rebootet die Maschine direkt ('fwupdmgr update -y' bejaht
-#    auch die Neustart-Frage). Ab hier ist nichts mehr offen — Host aktiv, VMs
-#    behandelt, flake.lock committet — der Reboot kann nichts Halbfertiges abreissen.
-#    Ohne fwupd (host-updates.nix nicht importiert): still ueberspringen. Mit
-#    --host-only: ueberspringen (ein BIOS-Reboot wuerde laufende VMs beenden —
-#    genau die Situation, fuer die --host-only da ist). LVFS hinkt Dell gelegentlich
-#    eine Version hinterher — bei Security-BIOS Gegencheck auf dell.com (aufbau.md).
-# ---------------------------------------------------------------------------
-if [ "$HOST_ONLY" -eq 1 ]; then
-  info "--host-only: Firmware-Abschnitt uebersprungen (BIOS-Reboot wuerde laufende VMs beenden)."
-elif ! command -v fwupdmgr >/dev/null 2>&1; then
-  info "fwupdmgr nicht vorhanden — Firmware-Abschnitt uebersprungen."
-elif [ "$DRY_RUN" -eq 1 ]; then
-  info "(dry-run) Wuerde LVFS-Metadaten auffrischen (fwupdmgr refresh) und Updates anzeigen."
-else
-  info "Pruefe Firmware-Updates (fwupd/LVFS)…"
-  fwupdmgr refresh --force >/dev/null 2>&1 \
-    || warn "LVFS-Refresh fehlgeschlagen (offline?) — pruefe mit lokalen Metadaten weiter."
-  if updates=$(fwupdmgr get-updates 2>/dev/null); then
-    printf '%s\n' "$updates"
-    warn "Bestaetigen wendet die Firmware JETZT an — ein BIOS-Update startet den Rechner"
-    warn "direkt neu. Offene Arbeit sichern; laufende VMs werden dabei hart beendet."
-    read -rp "$(printf '\033[1;34m[?]\033[0m Firmware jetzt anwenden? [j/N]: ')" ans || ans=""
-    case "$ans" in
-      [jJyY]*)
-        # sudo statt Polkit: laeuft auch in SSH-Sitzungen ohne Desktop-Polkit-Agent;
-        # der sudo-Timestamp ist vom switch (Abschnitt 2) meist ohnehin noch warm.
-        # ERSTLAUF BEOBACHTEN: exaktes Prompt-/Reboot-Verhalten von '-y' der
-        # installierten fwupd-Version verifizieren (siehe troubleshooting.md, D).
-        sudo fwupdmgr update -y \
-          || warn "Firmware-Update fehlgeschlagen/abgebrochen — spaeter: sudo fwupdmgr update"
-        ;;
-      *) info "Firmware uebersprungen — spaeter manuell: sudo fwupdmgr update" ;;
-    esac
-  else
-    ok "Keine Firmware-Updates gemeldet."
-  fi
-fi
-
-# Abschluss: Smoke-Warnungen prominent buendeln — die Einzelheiten stehen weiter oben
-# und im Session-Log; hier nur die Handlungsoptionen.
-if [ "$SMOKE_WARN" -eq 1 ]; then
-  warn "Mindestens ein Smoke-Check hat gewarnt — Details oben bzw. im Session-Log."
-  warn "Rollback bei Bedarf: sudo nixos-rebuild switch --rollback   (oder Bootmenue-Eintrag)."
-fi
-[ -n "$LOGFILE" ] && info "Session-Log dieses Laufs: $LOGFILE"
-ok "update-all fertig."
-SHEOF
-chmod +x update-all.sh
-echo "  -> Update-Erinnerung + update-all.sh angelegt."
-fi
-
-# ── Optional: geteiltes vfio-Modul (dGPU-Passthrough -> D3cold im Leerlauf) ──────────────────────
-# Nur wenn oben eine D3cold-faehige dGPU erkannt UND bestaetigt wurde. host.passthroughIds/-User
-# stehen bereits in der Host-Config (VFIO_CONFIG oben); hier kommt das Modul dazu, das daraus die
-# Bindung baut. Generisch & mischbar -> spaetere VMs koennen weitere IDs beitragen.
-if [ "$VFIO_D3COLD" = "1" ]; then
-cat > modules/vfio.nix <<'NIXEOF'
-# modules/vfio.nix — geteiltes Passthrough-Modul (AUTO-GENERIERT, danach frei editierbar).
-# Jede VM, die ein PCI-Geraet durchreicht, traegt nur ihre IDs zu host.passthroughIds bei
-# (Listen mergen in NixOS automatisch). Daraus baut dieses Modul EINE vfio-pci-Bindung +
-# IOMMU + libvirt. Aktiv nach 'nixos-rebuild switch' + REBOOT (Kernel-Parameter).
-{ config, lib, ... }:
-let
-  cfg = config.host;
-in
-{
-  options.host.passthroughIds = lib.mkOption {
-    type = lib.types.listOf lib.types.str;
-    default = [ ];
-    example = [ "10de:25a9" "8086:7e40" ];
-    description = "PCI vendor:device-IDs, die an vfio-pci gebunden werden (VM-Passthrough).";
-  };
-
-  options.host.passthroughUser = lib.mkOption {
-    type = lib.types.str;
-    default = "";
-    example = "alice";
-    description = "Optionaler Benutzer, der fuer sudo-loses virsh in die libvirtd-Gruppe kommt.";
-  };
-
-  config = lib.mkIf (cfg.passthroughIds != [ ]) (lib.mkMerge [
-    {
-      # intel_iommu/amd_iommu sind je auf der anderen Plattform ein No-op -> beide unbedingt
-      # setzbar, keine CPU-Erkennung noetig.
-      boot.kernelParams = [
-        "intel_iommu=on"
-        "amd_iommu=on"
-        "iommu=pt"
-        "vfio-pci.ids=${lib.concatStringsSep "," (lib.unique cfg.passthroughIds)}"
-      ];
-      # vfio frueh laden, damit das Binding VOR den normalen Treibern greift.
-      boot.initrd.kernelModules = [ "vfio_pci" "vfio_iommu_type1" "vfio" ];
-      # libvirt/KVM, um die durchgereichten Geraete in VMs zu nutzen.
-      virtualisation.libvirtd.enable = true;
-    }
-    (lib.mkIf (cfg.passthroughUser != "") {
-      users.users.${cfg.passthroughUser}.extraGroups = [ "libvirtd" ];
-    })
-  ]);
-}
-NIXEOF
-echo "  -> modules/vfio.nix angelegt (dGPU an vfio-pci -> D3cold im Leerlauf)."
-fi
-
-# ── Optional: Host-Haertung nach BSI SYS.2.3 (modules/hardening.nix) ─────────────────
-# Nur wenn oben danach gefragt wurde. Das Modul ist generisch; USBGuard aktiviert sich
-# erst, wenn die Host-Config hardening.usbguard.rulesFile setzt (s. HARDENING_CONFIG oben).
-if [ "$HARDENING" = "1" ]; then
-cat > modules/hardening.nix <<'NIXEOF'
-# modules/hardening.nix
-# ─────────────────────────────────────────────────────────────────────────────
-# Host-Haertung nach BSI IT-Grundschutz SYS.2.3 (Clients unter Linux und Unix),
-# Zielbild: Basis + Standard + erhoehter Schutzbedarf (H) auf den PHYSISCHEN
-# Arbeits-Maschinen (devbook, devstation). VMs importieren dieses Modul NICHT —
-# sie sind selbst die kompensierende Massnahme (Isolation exponierter Workloads).
-#
-# Abdeckung (Details + Erlaeuterungstexte fuer den GSC: README-hardening.md):
-#   A6  (S) Wechsellaufwerke: kein Automount-Zwang, udisks2 mountet noexec/nosuid/nodev
-#   A8  (S) AppArmor-LSM aktiv; Profilsatz auf NixOS faktisch leer -> Wirkung wird
-#           NixOS-nativ ueber systemd erbracht (Dienst-Maskierung + Sandboxing, s. unten)
-#   A11 (S) Ueberlauf-Schutz: nix-GC + min-free/max-free + journald-Deckel
-#   A14 (H) USBGuard: Whitelist aus dem Repo (deklarativ = "zentral verwaltet")
-#   A17 (H) via VM-Isolation + Dienst-Maskierung/-Sandboxing (Messverfahren: README)
-#   A18 (H) sysctl-Haertung statt hardened Kernel (Begruendung: libvirt/VFIO-Rueckgrat)
-#   A20 (H) SysRq auf 16 (nur Sync) — NixOS-Default, hier explizit/deterministisch
-#
-# BEWUSST NICHT umgesetzt (dokumentierte Abweichungen, s. README-hardening.md):
-#   A15 (H) noexec auf /home — bricht Zed/Language-Server; Entwicklung laeuft in der dev-VM
-#   linuxPackages_hardened — Konflikt-Risiko mit Virtualisierung/User-Namespaces
-{ config, lib, pkgs, ... }:
-
-let
-  cfg = config.hardening;
-in
-{
-  options.hardening = {
-    usbguard.rulesFile = lib.mkOption {
-      type = lib.types.nullOr lib.types.path;
-      default = null;
-      description = ''
-        Pfad zur gepinnten USBGuard-Regeldatei des Hosts (Ausgabe von
-        `sudo usbguard generate-policy`, im Repo eingecheckt). null = USBGuard aus —
-        konservativer Default, damit ein neuer Host ohne eigene Regelliste nicht
-        versehentlich alle USB-Geraete blockt. Pro Host eine EIGENE Datei erzeugen
-        (die Regeln tragen geraetespezifische Hashes/Ports).
-      '';
-      example = lib.literalExpression "./usbguard-rules.conf";
-    };
-  };
-
-  config = {
-    # ===== A6 — Wechsellaufwerke (S) ==========================================
-    # Plasma mountet nicht automatisch (Geraete-Benachrichtigung = manueller Klick);
-    # hier wird deklarativ festgeschrieben, WOMIT udisks2 mountet, wenn gemountet
-    # wird: nie ausfuehrbar, nie setuid, keine Geraetedateien. Gilt fuer alle per
-    # udisks eingebundenen Wechseldatentraeger (USB-Stick, SD-Karte, …).
-    services.udisks2.settings."mount_options.conf".defaults = {
-      defaults = "rw,nosuid,nodev,noexec";
-    };
-
-    # ===== A8 — AppArmor (S) ==================================================
-    # Kernel-LSM aktiv. Ehrlicher Befund (empirisch, 2026-07-20): der geladene
-    # Profilsatz ist LEER — die Upstream-Sammlung (apparmor-profiles) adressiert
-    # FHS-Pfade und greift auf NixOS-Store-Pfaden nicht. Das LSM bleibt bewusst an
-    # (kostenneutral; Pakete mit eigenen Profilen koennen andocken), die eigentliche
-    # Rechtebeschraenkung erbringt der systemd-Baustein unten. Nebenbefund: aa-status
-    # scheitert am leeren Profilsatz mit "Failed to get profiles: 2" — Tooling, kein
-    # Sicherheitsproblem (s. troubleshooting.md, Abschnitt J).
-    # killUnconfinedConfinables bleibt AUS (konservativ: kein Abschiessen laufender
-    # Prozesse beim Profil-Reload).
-    security.apparmor = {
-      enable = true;
-      packages = [ pkgs.apparmor-profiles ];
-      killUnconfinedConfinables = false;
-    };
-
-    # ===== A8/A17-Ergaenzung — systemd-Dienst-Haertung ========================
-    # Da AppArmor faktisch ohne Profile laeuft (s. oben), wird die Rechtebeschraenkung
-    # einzelner Dienste NixOS-nativ ueber systemd erbracht. Bestandsaufnahme,
-    # Korb-Einteilung und Nachmessung: README-hardening.md, Abschnitt
-    # "systemd-analyze security" (Baseline devbook 2026-07-20).
-    #
-    # (a) Angriffsflaeche ENTFERNEN statt sandboxen: die modularen libvirt-
-    # Treiber-Daemons fuer nicht genutzte Hypervisoren (LXC, VirtualBox, Xen)
-    # werden maskiert — dieser Verbund faehrt ausschliesslich QEMU/KVM
-    # (virtqemud bleibt unangetastet). Die Sockets MUESSEN mit maskiert werden,
-    # sonst belebt Socket-Aktivierung die Dienste wieder. enable=false maskiert
-    # die Unit in NixOS (Symlink auf /dev/null); auf Hosts ohne libvirt: No-op.
-    # Baseline-Wirkung: drei Eintraege mit Score 9.6 UNSAFE entfallen ersatzlos.
-    #
-    # (b) acpid sandboxen: kleiner root-Daemon (kam mit dem NVIDIA-Stack auf
-    # devbook), nimmt ACPI-Events via Netlink entgegen und startet Handler-
-    # Skripte. Konservatives Sandboxing: Dateisystem weitgehend read-only,
-    # nur AF_UNIX+AF_NETLINK, keine neuen Privilegien/Namespaces — die
-    # Handler (acEvent/lidEvent/powerEvent) laufen unveraendert als root.
-    # Guard: mkIf services.acpid.enable — auf Hosts OHNE acpid (z. B. ohne
-    # NVIDIA-Stack) entsteht sonst eine leere Unit-Huelle. Verifiziert devbook
-    # 2026-07-20: Score 9.6 UNSAFE -> 5.7 MEDIUM, AC-Events fehlerfrei.
-    # Bewusst NICHT gesetzt: ProtectSystem=strict, CapabilityBoundingSet,
-    # SystemCallFilter — erst nach laengerer Beobachtung nachziehen (konservativ).
-    # Stufe 2 (Merkposten): virtlogd/virtlockd sandboxen (simple Helfer, je 9.6).
-    systemd.services = lib.genAttrs [ "virtlxcd" "virtvboxd" "virtxend" ]
-      (_: { enable = false; })
-    // {
-      acpid = lib.mkIf config.services.acpid.enable {
-        serviceConfig = {
-          NoNewPrivileges = true;
-          PrivateTmp = true;
-          ProtectSystem = "full";            # /usr,/boot,/etc read-only (Store ist ohnehin ro)
-          ProtectHome = true;
-          ProtectKernelModules = true;
-          ProtectKernelLogs = true;
-          ProtectControlGroups = true;
-          ProtectClock = true;
-          RestrictAddressFamilies = [ "AF_UNIX" "AF_NETLINK" ];
-          RestrictNamespaces = true;
-          RestrictRealtime = true;
-          RestrictSUIDSGID = true;
-          LockPersonality = true;
-          SystemCallArchitectures = "native";
-        };
-      };
-    };
-    systemd.sockets = lib.genAttrs
-      (lib.concatMap (d: [ d "${d}-ro" "${d}-admin" ]) [ "virtlxcd" "virtvboxd" "virtxend" ])
-      (_: { enable = false; });
-
-    # ===== A11 — Schutz vor Ueberlastung der Platte (S) =======================
-    # Der realistische Vollaeufer auf NixOS ist /nix (ein btrfs-Pool, keine Quotas —
-    # bewusste Entscheidung: qgroups kosten Pflege + Performance). Drei Deckel:
-    #  1) woechentliche GC, Generationen aelter 14 Tage fallen weg
-    #     (Rollback-Fenster bleibt 14 Tage; systemd-boot haelt ohnehin max. 10 Eintraege)
-    #  2) min-free/max-free: laeuft der Store unter 2 GiB frei, raeumt Nix beim
-    #     Bauen selbststaendig bis 8 GiB frei — faengt den Vollaeufer WAEHREND
-    #     eines grossen Builds, wo der Wochen-Timer nicht hilft
-    #  3) journald gedeckelt (Logs liegen auf dem eigenen Subvolume /var/log)
-    nix.gc = {
-      automatic = true;
-      dates = "weekly";
-      options = "--delete-older-than 14d";
-    };
-    nix.settings = {
-      min-free = 2 * 1024 * 1024 * 1024;   # 2 GiB
-      max-free = 8 * 1024 * 1024 * 1024;   # 8 GiB
-    };
-    services.journald.extraConfig = ''
-      SystemMaxUse=1G
-    '';
-
-    # ===== A14 — USBGuard (H) =================================================
-    # Whitelist = eingecheckte Regeldatei (Option oben) -> "zentral verwaltete
-    # Whitelist" ist woertlich das Git-Repo. Neue Geraete: erst blocken lassen,
-    # dann Regel nachziehen (Workflow: README-hardening.md).
-    #   - implicitPolicyTarget block: alles ohne Regel wird blockiert
-    #   - presentControllerPolicy keep: Controller beim Daemon-Start NIE
-    #     deautorisieren (Lockout-Schutz)
-    #   - IPC fuer wheel: 'usbguard list-devices' & Notifier ohne root
-    services.usbguard = lib.mkIf (cfg.usbguard.rulesFile != null) {
-      enable = true;
-      ruleFile = cfg.usbguard.rulesFile;
-      implicitPolicyTarget = "block";
-      presentDevicePolicy = "apply-policy";
-      insertedDevicePolicy = "apply-policy";
-      presentControllerPolicy = "keep";
-      IPCAllowedGroups = [ "wheel" ];
-    };
-
-    # Sichtbarkeitsschicht: Desktop-Benachrichtigung, sobald ein Geraet
-    # erlaubt/geblockt wird (kein Management — Regeln kommen NUR aus dem Repo).
-    systemd.user.services.usbguard-notifier = lib.mkIf (cfg.usbguard.rulesFile != null) {
-      description = "USBGuard Desktop-Benachrichtigungen (allow/block-Ereignisse)";
-      wantedBy = [ "graphical-session.target" ];
-      after = [ "graphical-session.target" ];
-      serviceConfig = {
-        ExecStart = "${pkgs.usbguard-notifier}/bin/usbguard-notifier";
-        Restart = "on-failure";
-        RestartSec = 5;
-      };
-    };
-
-    # ===== A18 — Kernel-Haertung per sysctl (H) ===============================
-    # Statt linuxPackages_hardened (Konflikt-Risiko mit libvirt/VFIO/User-Namespaces;
-    # die BSI-Beispiele grsecurity/PaX sind seit 2017 nicht mehr frei verfuegbar).
-    # User-Namespaces bleiben bewusst AN (Nix-Build-Sandbox braucht sie).
-    boot.kernel.sysctl = {
-      # A20: SysRq nur Sync (NixOS-Default — hier explizit, damit deterministisch)
-      "kernel.sysrq" = 16;
-      # Kernel-Adressen nicht an Userspace verraten (erschwert Exploit-Entwicklung)
-      "kernel.kptr_restrict" = 2;
-      # dmesg nur fuer root (Kernel-Log leakt Adressen/Hardware-Details)
-      "kernel.dmesg_restrict" = 1;
-      # BPF nur fuer privilegierte Prozesse + JIT-Haertung (haeufiger LPE-Vektor)
-      "kernel.unprivileged_bpf_disabled" = 1;
-      "net.core.bpf_jit_harden" = 2;
-      # ptrace nur auf eigene Kindprozesse (yama) — bremst Credential-Harvesting
-      "kernel.yama.ptrace_scope" = 1;
-      # kexec aus: kein Laden eines Ersatz-Kernels zur Laufzeit (bis zum Reboot fix)
-      "kernel.kexec_load_disabled" = 1;
-      # keine Coredumps von setuid-Programmen
-      "fs.suid_dumpable" = 0;
-      # Link-/FIFO-Schutz in world-writable Verzeichnissen (haertet /tmp-Angriffe ab)
-      "fs.protected_symlinks" = 1;
-      "fs.protected_hardlinks" = 1;
-      "fs.protected_fifos" = 2;
-      "fs.protected_regular" = 2;
-    };
-
-    # ===== Deterministik: Firewall explizit an (NixOS-Default, festgeschrieben) =
-    networking.firewall.enable = true;
-  };
-}
-NIXEOF
-echo "  -> modules/hardening.nix angelegt (SYS.2.3: AppArmor-LSM, systemd-Dienst-Haertung, USBGuard, sysctl, udisks2-noexec)."
-fi
+# modules/hardening.nix kommt aus dem Basis-Payload (files/) — es wirkt nur via
+# IMPORTS ('J' oben); USBGuard zusaetzlich erst mit rulesFile (HARDENING_CONFIG).
 
 
 cat > "hosts/$HOST/DETECTED-HARDWARE.txt" <<EOF
@@ -1621,7 +811,7 @@ if [ "$HOSTUPDATES" = "1" ]; then
   echo "==> Update-Erinnerung: INSTALLIERT (Icon 'NixOS aktualisieren' + stuendlicher Check + fwupd)."
 else
   echo "==> Update-Erinnerung: UEBERSPRUNGEN (Prompt mit 'n' beantwortet)."
-  echo "    Nachruesten ohne Neuinstallation: troubleshooting.md -> Abschnitt D."
+  echo "    Nachruesten ohne Neuinstallation: docs/troubleshooting.md -> Abschnitt D."
 fi
 if [ "$HARDENING" = "1" ]; then
   if [ -f "hosts/$HOST/usbguard-rules.conf" ]; then
@@ -1629,10 +819,13 @@ if [ "$HARDENING" = "1" ]; then
     echo "    Verifikation nach dem Boot: usbguard list-devices --blocked  -> muss leer sein."
   else
     echo "==> Haertung (SYS.2.3): INSTALLIERT — USBGuard noch AUS (keine Whitelist erzeugt)."
-    echo "    Nachziehen: bash usbguard-sync.sh --init  (Referenz-Repo, README-hardening.md)."
+    echo "    Nachziehen: bash usbguard-sync.sh --init  (liegt im Repo; Doku: docs/README-hardening.md)."
   fi
 else
   echo "==> Haertung (SYS.2.3): UEBERSPRUNGEN (Prompt mit 'n' beantwortet)."
-  echo "    Nachruesten: modules/hardening.nix aus dem Referenz-Repo + README-hardening.md."
+  echo "    Nachruesten: Import-Zeile in der Host-Config — das Modul liegt bereits im Repo (docs/README-hardening.md)."
 fi
+echo "==> Payload: Basis aus files/ eingespielt, payload-sources.conf angelegt — zentrale"
+echo "    Updates kuenftig via 'bash update-all.sh' (Abschnitt 0b; docs/README-payload.md)."
+echo "==> Extensions (optional, kostenpflichtig — z. B. VM-Suite): docs/README-payload.md, §6."
 echo "==> Stick ziehen und 'sudo reboot'."

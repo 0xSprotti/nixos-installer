@@ -2,19 +2,33 @@
 
 Interaktives Installationsskript für eine minimale, verschlüsselte NixOS-Basis. Das Skript fragt die maschinenspezifischen Werte ab, erkennt die Zielplatte selbst, erzeugt daraus ein Flake-Config-Repo unter `~/nixos-config` und installiert.
 
-Es enthält keine persönlichen Daten und ist für beliebige Rechner geeignet.
+Es enthält keine persönlichen Daten und ist für beliebige Rechner geeignet. Die geteilten
+Dateien des erzeugten Repos (Module, `update-all.sh`, Werkzeuge, Doku, `flake.nix`) kommen
+als **Basis-Payload** aus dem `files/`-Verzeichnis dieses Repos mit — deshalb wird das
+Installer-Repo **komplett geklont**, nicht nur `install.sh` heruntergeladen.
 
 ## Was dabei herauskommt
 
 - NixOS 26.05, Flake-basiert
-- **Modular aufgebaut**: geteilter Desktop-/Basis-Stack in `modules/desktop.nix`, schlanke Host-Config je Rechner (importiert die Module, setzt nur Hostname + Benutzer)
+- **Modular aufgebaut**: geteilter Desktop-/Basis-Stack in `modules/desktop.nix` (regionale
+  Werte und Kernel dort als `mkDefault`-Vorschläge), schlanke Host-Config je Rechner
+  (importiert die Module, setzt Hostname + Benutzer + deine Prompt-Antworten als Overrides)
 - Vollverschlüsselt: LUKS2 auf der ganzen Platte, btrfs mit Subvolumes (`/`, `/home`, `/nix`, `/persist`, `/var/log`, zstd-komprimiert, noatime)
-- systemd-boot (UEFI), systemd-Stage-1-initrd, LTS-Kernel
+- systemd-boot (UEFI), systemd-Stage-1-initrd; Kernel: **Mainline (latest)** als
+  Flotten-Vorschlagswert (per Prompt auf LTS umstellbar — landet dann als normaler
+  Host-Override in deiner Config, Hintergrund in `docs/troubleshooting.md`, J)
 - KDE Plasma 6 (SDDM)
 - Deklarativer Benutzer; die Passwort-Hashes liegen auf `/persist`, nicht im Repo
-- **Optional**: Update-Erinnerung — Desktop-Icon + stündlicher Check auf neue nixpkgs-Stände (zurückstellbar um 1 h / 8 h / bis morgen), dazu `update-all.sh` als Ein-Klick-Update mit Paket-Diff (`nvd`), Session-Log, Smoke-Checks und Firmware/BIOS-Updates via fwupd (LVFS)
+- **Optional**: Update-Erinnerung — Desktop-Icon + stündlicher Check auf neue nixpkgs-Stände (zurückstellbar um 1 h / 8 h / bis morgen), dazu `update-all.sh` als Ein-Klick-Update mit Paket-Diff (`nvd`), Session-Log, Smoke-Checks und Firmware/BIOS-Updates via fwupd (LVFS) — und **zentralen Datei-Updates** über den
+  Payload-Mechanismus (`payload-sources.conf` + Abschnitt 0b, s. u.)
 - **Optional**: Wird eine D3cold-fähige dedizierte GPU erkannt, kann sie auf Wunsch per vfio-pci gebunden werden. Im Leerlauf fällt sie dann in echtes **D3cold** (Slot stromlos) — auf Hybrid-Laptops spart das spürbar Strom, weil der Desktop ohnehin auf der iGPU läuft. Die dGPU steht danach nur noch für **VM-Passthrough** bereit, nicht mehr dem Host (kein CUDA/Host-Gaming).
-- **Optional**: Host-Härtung nach **BSI IT-Grundschutz SYS.2.3** (Standard: Ja) — AppArmor-LSM, **systemd-Dienst-Härtung** (Maskierung der ungenutzten libvirt-Treiber-Daemons für LXC/VirtualBox/Xen samt Sockets; Sandbox für acpid, sofern vorhanden), sysctl-Kernel-Härtung, `noexec/nosuid/nodev` für Wechselmedien, GC-/Log-Deckel und **USBGuard** mit einer aus dem Live-System erzeugten Geräte-Whitelist (alles andere wird geblockt, aktiv ab dem ersten Boot). Schlägt die Whitelist-Erzeugung fehl (z. B. offline), bleibt das Härtungsmodul installiert und nur USBGuard aus — nachrüstbar per `usbguard-sync.sh --init` aus dem Referenz-Repo.
+- **Optional**: Host-Härtung nach **BSI IT-Grundschutz SYS.2.3** (Standard: Ja) — AppArmor, sysctl-Kernel-Härtung, `noexec/nosuid/nodev` für Wechselmedien, GC-/Log-Deckel und **USBGuard** mit einer aus dem Live-System erzeugten Geräte-Whitelist (alles andere wird geblockt, aktiv ab dem ersten Boot). Schlägt die Whitelist-Erzeugung fehl (z. B. offline), bleibt das Härtungsmodul installiert und nur USBGuard aus — nachrüstbar per `usbguard-sync.sh --init` (liegt bereits im Repo).
+
+- **Immer dabei** (unabhängig von den Prompts): der komplette Basis-Payload aus `files/` —
+  alle Module, `update-all.sh`, `usbguard-sync.sh`/`check-usbguard.sh`, `check-vfio.sh`, die
+  Auto-Discovery-`flake.nix` und die gesamte Doku unter `docs/`. Module sind Infrastruktur;
+  **wirken** tun sie erst über die Import-Entscheidungen der Prompts. Dazu
+  `payload-sources.conf`, die das Repo mit künftigen zentralen Updates verbindet.
 
 Das ist bewusst eine minimale First-Boot-Basis (auf Wunsch bereits SYS.2.3-gehärtet). VMs, Secure Boot mit eigenen Schlüsseln usw. baust du anschließend auf dieser Grundlage auf.
 
@@ -29,8 +43,10 @@ Das ist bewusst eine minimale First-Boot-Basis (auf Wunsch bereits SYS.2.3-gehä
 Im Live-Installer:
 
 ```bash
-# Skript holen (curl ist im Installer i.d.R. vorhanden; sonst: nix-shell -p curl --run '...')
-curl -O https://raw.githubusercontent.com/0xSprotti/nixos-installer/main/install.sh
+# Repo KOMPLETT klonen — install.sh braucht den files/-Payload daneben.
+# (Ein Einzeldatei-Download bricht früh mit einer klaren Meldung ab.)
+nix-shell -p git --run 'git clone https://github.com/0xSprotti/nixos-installer.git'
+cd nixos-installer
 
 # 1) Prüf-Lauf: erzeugt NUR die Config-Dateien, löscht NICHTS
 bash install.sh --dry-run
@@ -79,24 +95,30 @@ Bei Pool/Spiegel liegt ein LUKS über dem RAID → eine Passphrase; die ESP (`/b
 
 ```
 ~/nixos-config/
-├── flake.nix                      # AUTO-DISCOVERY: Outputs werden aus hosts/ abgeleitet (Ordner = Host)
-├── modules/
-│   ├── desktop.nix                # geteilter Desktop-/Basis-Stack (Boot, Netz, Locale, KDE)
-│   ├── host-updates.nix           # nur mit Update-Erinnerung: Icon + Notify-Timer (Snooze via systemd) + fwupd/LVFS
-│   ├── hardening.nix              # nur mit Härtung: SYS.2.3 (AppArmor-LSM, Dienst-Härtung, USBGuard, sysctl, GC-Deckel)
-│   └── vfio.nix                   # nur mit vfio-Bindung: dGPU an vfio-pci (mischbares Passthrough-Modul)
-├── update-all.sh                  # nur mit Update-Erinnerung: Ein-Klick-Update (Flake → Diff → Host → Firmware)
+├── flake.nix                      # Auto-Discovery: findet Hosts + spätere VM-Gäste von selbst
+├── payload-sources.conf           # Quellen für zentrale Updates (update-all.sh, Abschnitt 0b)
+├── update-all.sh                  # Ein-Klick-Update: Payload → Flake → Diff → Host → Firmware
+├── usbguard-sync.sh / check-usbguard.sh / check-vfio.sh
+├── modules/                       # IMMER vorhanden — wirken erst über die Import-Prompts
+│   ├── desktop.nix                # Basis-Stack; Locale/Tastatur/Kernel als mkDefault-Vorschläge
+│   ├── host-updates.nix           # Update-Erinnerung: Icon + Notify-Timer (Snooze) + fwupd/LVFS
+│   ├── hardening.nix              # SYS.2.3: AppArmor, USBGuard, sysctl, udisks2-noexec, GC-Deckel
+│   └── vfio.nix                   # dGPU→vfio-pci (ohne host.passthroughIds ein reiner No-op)
+├── docs/                          # komplette Doku: Payload, Härtung, Troubleshooting, Cheatsheets
 └── hosts/<host>/
+    ├── configuration.nix          # Hostname, Benutzer, deine Prompt-Overrides, Imports
     ├── disk.nix                   # disko: GPT + LUKS2 + btrfs (je nach Platten-Modus)
-    ├── configuration.nix          # schlank: importiert modules/, setzt Hostname + Benutzer
-    ├── usbguard-rules.conf        # nur mit Härtung: gepinnte USBGuard-Whitelist (aus dem Live-System erzeugt)
+    ├── usbguard-rules.conf        # nur mit Härtung: gepinnte Whitelist (aus dem Live-System)
     ├── hardware-configuration.nix # live erzeugt
     └── DETECTED-HARDWARE.txt      # GPU/WLAN-IDs als Referenz (nicht aktiv)
 ```
 
-Der geteilte Stack (Boot, Netzwerk, Locale, Tastatur, KDE, Basis-Pakete) liegt in `modules/desktop.nix`; die regionalen Werte (Zeitzone/Locale/Tastatur) sind dort aus den Abfragen fixiert. Die `hosts/<host>/configuration.nix` importiert dieses Modul und setzt nur das Maschinenspezifische (Hostname, Benutzer, ggf. die `host.passthroughIds` der dGPU). Das `modules/vfio.nix` ist generisch und mischbar — spätere VMs können eigene Geräte-IDs beitragen.
-
-Die erzeugte `flake.nix` ist **host-agnostisch** (Auto-Discovery): Die `nixosConfigurations` werden per `readDir` aus `hosts/` abgeleitet. Konvention: `configuration.nix` ist Pflicht (Ordner ohne sie werden ignoriert); liegt zusätzlich eine `hardware-configuration.nix` im Ordner, gilt der Eintrag als **physischer Host** und bekommt automatisch disko + `disk.nix` + `hardware-configuration.nix` eingebunden; ohne sie ist es eine **VM** (nur `configuration.nix`). **Weitere Maschinen oder VMs sind damit nur ein weiterer Ordner unter `hosts/` — kein Flake-Edit.** Das macht das Repo flottentauglich: Eine auf Maschine B erzeugte `hosts/B/` lässt sich per Ordner-Kopie in ein bestehendes Verbund-Repo übernehmen (`git add -A`, `nixos-rebuild switch --flake .#B`) — die Repos sind strukturgleich.
+Der geteilte Stack liegt in `modules/desktop.nix` — Zeitzone, Locale, Tastatur und Kernel
+stehen dort als **mkDefault-Vorschläge**; deine Prompt-Antworten landen als normale
+Zuweisungen in `hosts/<host>/configuration.nix` und übersteuern sie ohne `mkForce`
+(Drei-Ebenen-Regel: `docs/nixos-cheatsheet.md`, §13). Weitere Hosts sind ein Ordner
+`hosts/<name>/` mit den drei Dateien — die Auto-Discovery-`flake.nix` findet sie von
+selbst. `modules/vfio.nix` ist generisch und mischbar — spätere VMs tragen eigene IDs bei.
 
 ## Weiterverwenden
 
@@ -106,6 +128,16 @@ Der Installer kopiert die erzeugte Config nach `/home/<user>/nixos-config` auf d
 cd ~/nixos-config
 sudo nixos-rebuild switch --flake .#<host>
 ```
+
+### Zentrale Updates (Payload)
+
+Die geteilten Dateien werden zentral gepflegt: `bash update-all.sh` prüft **ganz am
+Anfang** (Abschnitt 0b) die Quellen aus `payload-sources.conf`, zeigt den Diff und
+übernimmt erst nach deinem `[J/n]` — mit Provenienz-Commit
+(`git log --oneline --grep=payload` als Chronik). Versions-Pinning (`#tag`) und interne
+Spiegel sind eine Zeilen-Änderung; Zonen-Modell, bewusstes Abweichen und alle Details:
+`docs/README-payload.md`. Kostenpflichtige **Extensions** (z. B. die VM-Suite) kommen nach
+demselben Muster als zweite Quelle dazu (README-payload, §6).
 
 Hast du die Update-Erinnerung gewählt, gibt es zusätzlich ein Desktop-Icon „NixOS aktualisieren" und `update-all.sh`:
 
@@ -123,7 +155,7 @@ Nach der Aktivierung laufen **Smoke-Checks**: der systemd-Zustand wird geprüft,
 
 Hast du die vfio-Bindung gewählt, greift sie nach dem **nächsten Reboot** (Kernel-Parameter); danach hängt die dGPU an `vfio-pci` und fällt im Leerlauf in D3cold. Prüfen mit `lspci -nnk -d <vendor:device>` (erwartet: `Kernel driver in use: vfio-pci`).
 
-Hast du die Härtung gewählt, ist sie ab dem ersten Boot aktiv. Kurz-Verifikation: `usbguard list-devices --blocked` muss **leer** sein (sonst wurde ein internes Gerät nicht erfasst — Regel nachziehen), `aa-enabled` antwortet `Yes` (Hinweis: `sudo aa-status` meldet auf NixOS „Failed to get profiles: 2" — erwartet, da der AppArmor-Profilsatz dort faktisch leer ist; die Rechtebeschränkung erbringt die systemd-Dienst-Härtung, Details: `README-hardening.md` und `troubleshooting.md` §J im Referenz-Repo), `systemctl is-enabled virtlxcd.service` antwortet `masked`, und ein gemounteter USB-Stick trägt `noexec` (`findmnt /run/media/$USER/*`). Neue USB-Geräte werden per Default **geblockt** und am Desktop gemeldet; dauerhaft erlauben über die versionierte Whitelist `hosts/<host>/usbguard-rules.conf` (Workflow und Details: `usbguard-sync.sh` und `README-hardening.md` im Referenz-Repo). Meldet der Installer, dass die Whitelist nicht erzeugt werden konnte, ist USBGuard aus — nachrüsten mit `bash usbguard-sync.sh --init` und anschließendem Rebuild.
+Hast du die Härtung gewählt, ist sie ab dem ersten Boot aktiv. Kurz-Verifikation: `usbguard list-devices --blocked` muss **leer** sein (sonst wurde ein internes Gerät nicht erfasst — Regel nachziehen), `sudo aa-status` zeigt geladene AppArmor-Profile, und ein gemounteter USB-Stick trägt `noexec` (`findmnt /run/media/$USER/*`). Neue USB-Geräte werden per Default **geblockt** und am Desktop gemeldet; dauerhaft erlauben über die versionierte Whitelist `hosts/<host>/usbguard-rules.conf` (Workflow und Details: `usbguard-sync.sh` und `docs/README-hardening.md` — beides liegt im Repo). Meldet der Installer, dass die Whitelist nicht erzeugt werden konnte, ist USBGuard aus — nachrüsten mit `bash usbguard-sync.sh --init` und anschließendem Rebuild.
 
 Zum Sichern/Versionieren ein eigenes (separates, ggf. privates) Remote hinzufügen und pushen:
 
@@ -133,22 +165,6 @@ git push -u origin main
 ```
 
 Dieses Installer-Repo und deine generierte Config sind getrennte Repos.
-
-## Pflege-Hinweis (für Beiträge an diesem Repo)
-
-`install.sh` trägt **eingebettete Vollkopien** der Modul-Dateien als Heredocs — insbesondere `modules/hardening.nix` und die (host-agnostische) `flake.nix`. Ändert sich eine Quelle im Referenz-Repo (`nixos-config`), muss der jeweilige Heredoc hier nachgezogen werden, sonst installieren neue Hosts einen veralteten Stand (genau diese Drift ist 2026-07-20 einmal passiert). Prüf-Einzeiler vor jedem Commit — gehören wie `bash -n` + shellcheck zum Qualitäts-Gate:
-
-```bash
-diff <(awk "/^cat > modules\/hardening.nix <<'NIXEOF'\$/{f=1;next} /^NIXEOF\$/{f=0} f" install.sh) \
-     ../nixos-config/modules/hardening.nix \
-  && echo "hardening-Heredoc synchron" || echo "DRIFT: hardening-Heredoc nachziehen!"
-
-diff <(awk "/^cat > flake.nix <<'NIXEOF'\$/{f=1;next} /^NIXEOF\$/{f=0} f" install.sh) \
-     ../nixos-config/flake.nix \
-  && echo "flake-Heredoc synchron" || echo "DRIFT: flake-Heredoc nachziehen!"
-```
-
-shellcheck läuft ad hoc ohne Installation: `nix run nixpkgs#shellcheck -- install.sh`. Die Findings-Baseline ist **versionsabhängig**: shellcheck 0.9.0 meldet SC2015 + SC2086, aktuelle Versionen nur noch SC2086 — beide sind bekannte, beabsichtigte Ausnahmen, kein Handlungsbedarf; **neue** Findings dagegen schon.
 
 ## Lizenz
 
