@@ -26,6 +26,20 @@ Format je Eintrag: **Symptom** (was du siehst) · **Ursache** · **Fix**.
 - **Ursache:** Flakes bauen nur aus **Git-getrackten** Dateien. Eine **neue, ungetrackte** Datei sieht
   der Build gar nicht. Die dirty-Warnung selbst ist **harmlos und erwartet**.
 - **Fix:** vor jedem `nixos-rebuild`/`deploy-*.sh`: `git add -A`.
+- **Seit 2026-07-27 abgefangen:** Die Deploy-Skripte **brechen ab**, wenn
+  `hosts/<vm>/configuration.nix` fehlt oder nicht getrackt ist
+  (`… ist nicht von git getrackt — 'git add -A' ausfuehren.`). Vorher lief der Deploy in diesem
+  Fall durch und baute stillschweigend die **ältere getrackte Fassung** — Erfolgsmeldung, alter
+  Stand im Image.
+
+### `deploy-*-vm.sh`: „In flake.nix fehlt der '…'-Output" ✓ behoben 2026-07-27 — war Fehlalarm
+- **Historie (falls die Meldung in alten Logs auftaucht):** Beide Deploy-Skripte prüften per
+  `grep -qF '<vm>' flake.nix`, ob der Output existiert. Seit der Auto-Discovery (Baustein A) nennt
+  `flake.nix` **keinen Host mehr namentlich** — der Check schlug damit bei jedem Lauf Fehlalarm.
+- **Der damals vorgeschlagene Schnipsel war zusätzlich falscher Rat:** ein manuell ergänzter
+  `nixosConfigurations.<vm>`-Block kollidiert mit `lib.genAttrs` in der Auto-Discovery.
+- **Heute:** Geprüft wird die echte Vorbedingung (Datei existiert + ist getrackt), und zwar als
+  Abbruch statt Warnung.
 
 ### „boot.loader.grub.devices muss gesetzt sein" (Assertion)
 - **Ursache:** Irgendwo wird GRUB aktiv, obwohl das Gerät über systemd-boot bootet.
@@ -94,6 +108,25 @@ Format je Eintrag: **Symptom** (was du siehst) · **Ursache** · **Fix**.
 ### `virsh console dev-vm` „sieht aus wie der Host"
 - **Klarstellung (kein Fehler):** Der Prompt `[dev@dev-vm]` auf der seriellen Konsole **ist** die VM.
   SSH muss trotzdem **vom Host** kommen (eigenes Terminal). Raus aus der Konsole: `Strg-]`.
+
+### `error: failed to get domain 'dev-vm'` / `virsh list --all` ist leer ✓ erlebt 2026-07-27
+- **Symptom:** `virsh list --all` zeigt nichts, `virsh shutdown dev-vm` meldet
+  `error: failed to get domain 'dev-vm'` — obwohl die VM nachweislich läuft.
+- **Ursache:** Plain `virsh` als User verbindet nach `qemu:///session`. **Alle** VMs dieses Repos
+  leben in der **System**-Verbindung; die Deploy-Skripte nutzen durchgehend `sudo virsh`.
+- **Fix:** `sudo virsh list --all` bzw. `virsh -c qemu:///system …` (s. `nixos-cheatsheet.md`).
+- **Gilt für beide VMs**, nicht nur die dev-vm.
+
+### VM vor `deploy-*-vm.sh` von Hand stoppen? ✓ nicht nötig — Skript macht das selbst
+- **Klarstellung:** `deploy-dev-vm.sh` erkennt eine laufende Domain und stoppt sie selbst
+  (`Domain dev-vm laeuft — wird gestoppt (frischer Root folgt).` → `sudo virsh destroy`).
+- **Nicht verwechseln:** Die Regel „**laufende VMs werden nie angefasst**" gilt für
+  **`update-all.sh`** (dort werden nur gestoppte VMs gate-frei mit `--no-start` deployt), **nicht**
+  für den manuellen Deploy-Pfad.
+- **Konsequenz von `destroy`:** harter Stromschlag, kein sauberes Herunterfahren. Für den Root egal
+  (wird ohnehin verworfen), für `/home/dev` (ext4 auf vdb) auch — das Journal wird abgespielt.
+  **Weg sind ungespeicherte Editor-Puffer.** Wer offene Arbeit hat: vorher
+  `sudo virsh shutdown dev-vm` und den Zustand abwarten.
 
 ---
 
@@ -362,6 +395,61 @@ Wo der Trace endet, sagt die Ursache:
 ### Nach Redeploy fragt Claude-Code erneut „trust this folder?"
 - **Klarstellung (kein Fehler):** Der Workspace-Trust-Dialog kommt einmal pro Ordner, den Claude-Code
   zum ersten Mal sieht — **kein** Login-/Persistenz-Problem. Mit `1. Yes, I trust this folder` bestätigen.
+
+### Modell fehlt im `/model`-Picker (z. B. Opus 5) ✓ erlebt 2026-07-27 — Versionsfloor
+- **Symptom:** `/model` listet nur ältere Modelle (Opus 4.8, Sonnet 4.6); ein erwartetes neues
+  Modell fehlt **komplett**. Keine Fehlermeldung, kein Hinweis.
+- **Ursache:** Modelle haben **harte CLI-Mindestversionen** — Opus 5 `>= 2.1.219`,
+  Sonnet 5 `>= 2.1.197`. Ist das CLI älter, existiert die Zeile im Picker gar nicht.
+- **Kein Namensschema-Thema:** `Opus` im Picker ist dann **wirklich** Opus 4.8, nicht Opus 5 unter
+  anderem Namen — vor 2.1.219 löst der Alias `opus` auf Opus 4.8 auf.
+- **Meist auch KEIN Skriptfehler.** `claude-code` kommt aus nixpkgs, und der stabile Branch hinkt
+  strukturell ~1 Monat hinterher. `nix flake update` + Redeploy ändern dann nichts — der
+  Flaschenhals ist der **Kanal**, nicht die Update-Kette. Gegenprobe (was 26.05 gerade führt vs.
+  was es überhaupt gibt):
+  ```bash
+  curl -s https://raw.githubusercontent.com/NixOS/nixpkgs/nixos-26.05/pkgs/by-name/cl/claude-code/manifest.json
+  curl -s https://registry.npmjs.org/@anthropic-ai/claude-code | jq -r '."dist-tags".latest'
+  ```
+- **Fix (umgesetzt 2026-07-27):** `claude-code` kommt aus `nixpkgs-unstable` — per
+  `builtins.fetchTarball`-Pin (Revision + `sha256`) direkt in `hosts/dev-vm/configuration.nix`.
+  **Bewusst kein Flake-Input:** `flake.nix` steht im Basis-Payload, die dev-VM-Config in der
+  VM-Schicht; ein Input hätte den Belang der VM-Suite in die Basis getragen. Aufbau,
+  Bump-Ablauf und Rückbau stehen im Kopfkommentar des Pin-Blocks in derselben Datei.
+
+### Image-Build bricht ab: `Refusing to evaluate 'claude-code' … unfree license` ✓ zweite Definitionsstelle
+- **Ursache seit 2026-07-27:** Der `allowUnfreePredicate` **in der dev-VM-Config gilt nicht für den
+  importierten Baum**. Jede nixpkgs-Instanz trägt ihre eigene `config`; die Unfree-Prüfung läuft dort,
+  wo die Derivation entsteht — also im `import` innerhalb des Overlays.
+- **Fix:** `config.allowUnfreePredicate` **im Overlay-Import** setzen (nicht nur außen). Die beiden
+  Stellen lassen sich nicht zusammenfassen — gleiche Klasse wie die Falle in `modules/desktop.nix`.
+- **Merke:** Der äußere Predicate ist derzeit wirkungslos und steht trotzdem absichtlich da
+  (Rückfahrkarte für den Rückbau auf reines 26.05). Änderungen dort bleiben folgenlos.
+
+### `error: hash mismatch in file downloaded from …/nixpkgs/archive/<rev>.tar.gz` ✓ erlebt 2026-07-27
+- **Symptom:** `specified: sha256:0000000000…` (lauter Nullen), darunter ein `got:` mit dem echten Wert.
+- **Ursache:** Die Nullen sind die Base32-Darstellung von `lib.fakeHash` — der Platzhalter steht noch
+  im `fetchTarball`-Block, der echte Hash wurde nie eingetragen.
+- **Fix:** Den Wert aus `got:` bei `sha256` eintragen. Das ist der reguläre Bump-Ablauf (Muster wie
+  beim Rabby-Pin der browser-vm), kein Fehler.
+- **Vorab statt per Abbruch:**
+  `nix-prefetch-url --unpack https://github.com/NixOS/nixpkgs/archive/<rev>.tar.gz`
+  — die letzte Ausgabezeile ist der Hash. Die Zeile `path is '…tar.gz'` davor irritiert, ist aber
+  korrekt: gehasht wird trotzdem der **ausgepackte** Baum.
+- **Ohne `sha256` geht es nicht:** `fetchTarball` ohne Hash ist unrein, die Flake-Evaluation lehnt
+  es ab. Revision + Hash zusammen **sind** der Pin.
+
+### Build bricht ab: `claude-code ist X, benoetigt wird >= 2.1.219` ✓ Assertion greift wie geplant
+- **Einordnung:** Das ist die eingebaute Assertion, kein Defekt — sie verhindert, dass bei einem
+  ausgefallenen Overlay still ein zu altes CLI ausgeliefert wird. Seit dem `fetchTarball`-Pin gibt
+  es keinen `flake.lock`-Eintrag mehr, der die Version mitführt — diese Assertion ist die **einzige**
+  automatische Absicherung.
+- **Ursachen, in dieser Reihenfolge prüfen:**
+  1. `git add -A` vergessen → die geänderte Datei ist für die Flake-Evaluation unsichtbar.
+  2. Die gepinnte Revision ist zu alt. Was sie führt, zeigt:
+     `curl -s https://raw.githubusercontent.com/NixOS/nixpkgs/<rev>/pkgs/by-name/cl/claude-code/manifest.json`
+  3. Overlay-Block in `hosts/dev-vm/configuration.nix` verloren gegangen.
+- **Gegencheck:** `nix eval .#nixosConfigurations.dev-vm.pkgs.claude-code.version`
 
 ---
 

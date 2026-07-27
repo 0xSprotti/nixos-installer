@@ -62,9 +62,20 @@ Recovery, wenn nichts mehr bootet: ältere Generation starten → Config fixen �
 ```
 nix flake update                  # ALLE Inputs heben -> schreibt flake.lock neu
 nix flake update nixpkgs          # nur einen Input heben
+nix flake update nixpkgs disko    # mehrere gezielt
+nix flake lock                    # NUR fehlende Inputs ergaenzen, nichts heben
 nix flake metadata                # was ist gepinnt? (Inputs + Revisionen)
 git diff flake.lock               # was hat sich an den Pins geaendert?
 ```
+> `nix flake lock` vs. `nix flake update`: `lock` traegt einen NEU hinzugefuegten Input nach und
+> laesst alle bestehenden Pins unangetastet — der richtige Befehl direkt nach einem Input-Edit in
+> `flake.nix`. `update` hebt zusaetzlich alles Bestehende und macht den anschliessenden `nvd`-Diff
+> unlesbar. Vorher immer `git add -A`, sonst ist der neue Input fuer die Evaluation unsichtbar.
+>
+> Nicht jeder Pin steckt in `flake.lock`: `hosts/dev-vm/configuration.nix` pinnt `claude-code`
+> per `builtins.fetchTarball` (Revision + sha256 direkt in der Datei), weil 26.05 zu alt fuer
+> Opus 5 ist. Den hebt `nix flake update` NICHT — Bump ist eine bewusste Commit-Entscheidung,
+> Ablauf steht im Kommentar an Ort und Stelle (Muster wie der Rabby-Pin der browser-vm).
 Dein Komfort-Weg (Flake-Bump + Host + alle VMs auf einen Schlag):
 ```
 bash update-all.sh                # fragt pro VM; committet flake.lock als DU

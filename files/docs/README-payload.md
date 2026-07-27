@@ -1,11 +1,11 @@
 # Payload-System — wie dieses Repo aktuell bleibt
 
 > Dein `~/nixos-config` ist **dein** Repo — aber ein Großteil seiner Dateien wird zentral
-> gepflegt und dir als **Payload** ausgeliefert: aus dem öffentlichen **Basis-Repo**
-> (Installer + Arbeitsplatz-Härtung) und optional aus dem privaten **Extensions-Repo**
-> (z. B. die VM-Suite). `update-all.sh` gleicht beide Quellen bei jedem Lauf ab und
-> übernimmt Neues erst nach deinem ausdrücklichen `[J/n]`. Dieses Dokument erklärt die
-> zwei Zonen deines Repos, den Update-Fluss und wie du Quellen pinnst oder intern spiegelst.
+> gepflegt und dir als **Payload** ausgeliefert: aus dem **Basis-Repo** (Installer +
+> Arbeitsplatz-Härtung) und optional aus einem **Produkt-Repo** (z. B. der VM-Suite).
+> `update-all.sh` gleicht alle Quellen bei jedem Lauf ab und übernimmt Neues erst nach
+> deinem ausdrücklichen `[J/n]`. Dieses Dokument erklärt die zwei Zonen deines Repos,
+> den Update-Fluss und wie du Quellen pinnst oder intern spiegelst.
 
 ---
 
@@ -22,46 +22,59 @@ Kurzform: **Config nach `hosts/<host>/`, alles andere kommt per Payload.**
 
 ## 2. Woher die Dateien kommen
 
-Beide Auslieferungs-Repos sind reine **Daten-Container**: ein `files/`-Verzeichnis, das die
+Alle Auslieferungs-Repos sind reine **Daten-Container**: ein `files/`-Verzeichnis, das die
 Zielstruktur 1:1 spiegelt, plus README und Lizenz — **keine Skripte** (die gesamte
 Übernahme-Logik lebt in deinem `update-all.sh` und aktualisiert sich darüber selbst).
 
-- **Basis** (öffentlich): Installer, geteilte Module (`desktop`, `hardening`, `vfio`,
-  `host-updates`), `update-all.sh`, USBGuard-Werkzeuge, generische Doku, `flake.nix`
-  (Auto-Discovery — neue Hosts und VM-Gäste werden ohne Flake-Änderung erkannt).
-- **Extensions** (privat, kostenpflichtig — Zugang als Repo-Collaborator, je Produkt ein
-  eigenes Repo `nixos-extensions-<produkt>`): abgeschlossene Wert-Pakete, z. B. die
+- **Basis** (öffentlich, `nixos-installer`): Installer, geteilte Module (`desktop`,
+  `hardening`, `vfio`, `host-updates`), `update-all.sh`, USBGuard-Werkzeuge, generische
+  Doku, `flake.nix` (Auto-Discovery — neue Hosts und VM-Gäste werden ohne Flake-Änderung
+  erkannt).
+- **Produkte**: abgeschlossene Wert-Pakete, je Produkt ein eigenes Repo. Aktuell die
   **VM-Suite** (`nixos-extensions-vm`: Zero-Trust-browser-VM, dev-VM, VM-Netz-Isolierung,
-  Deploys, Checks, Doku). Weitere Produkte (etwa AD-Integration) erscheinen als eigene
-  Quelle/eigenes Repo nach demselben Muster.
+  Deploys, Checks, Doku). Weitere Produkte erscheinen nach demselben Muster.
+
+Jedes Repo führt je NixOS-Release einen Branch `release-XX.YY` und darauf Tags
+`vXX.YY.N`. `main` zeigt stets auf den aktuellen Release. Ein Versionssprung ist
+also ein neuer Branch im selben Repo, kein neues Repo.
 
 ---
 
 ## 3. Quellen-Datei: `payload-sources.conf`
 
-Liegt in der Repo-Wurzel; `install.sh` legt sie mit der Basis-Zeile an. Format —
-**eine Quelle je Zeile**, `#` kommentiert:
+Liegt in der **Repo-Wurzel** deines `~/nixos-config`. `install.sh` legt sie bei der
+Installation an (eigene Frage, Default „ja") und trägt die Basis-Zeile passend zum
+installierten NixOS-Release ein — hast du den Installer von einem internen Spiegel
+geklont, steht dessen URL drin. Ein späterer Installer-Lauf **überschreibt sie nie**.
+
+Fehlt die Datei, schläft der Payload-Abgleich still; du legst sie dann von Hand an.
+Format — eine Quelle je Zeile, `#` kommentiert:
 
 ```
 # name=url-oder-pfad[#ref]     ref = Branch, Tag oder Commit (Pin)
-basis=https://github.com/<anbieter>/nixos-installer.git#v1
-# vm=git@github.com:<anbieter>/nixos-extensions-vm.git#v1        # nach Kauf eintragen
+basis=https://github.com/<anbieter>/nixos-installer.git#release-26.05
+vm=https://github.com/<anbieter>/nixos-extensions-vm.git#release-26.05
 # (weitere Produkte nach demselben Muster, z. B. ad=…)
 ```
 
-Drei Betriebsmodelle, jeweils **eine Zeilen-Änderung**:
+Vier Betriebsmodelle, jeweils **eine Zeilen-Änderung**:
 
-1. **Folgen** — Branch als `ref` (oder keins): jeder `update-all`-Lauf bietet den
-   neuesten Stand an.
-2. **Pinnen** — Tag/Commit als `ref`: ihr bleibt auf einem geprüften Stand
-   (z. B. `#v1.2`), bis ihr den Pin bewusst hebt. Empfohlen für Firmen.
-3. **Intern spiegeln** — beide Repos auf den eigenen Git-Server spiegeln
+1. **Release-Linie folgen** — Branch als `ref` (`#release-26.05`): jeder
+   `update-all`-Lauf bietet den neuesten Stand **dieser** Linie an, ohne
+   Versionssprünge. Der empfohlene Normalfall, den auch `install.sh` einträgt.
+2. **Pinnen** — Tag als `ref` (`#v26.05.3`): ihr bleibt exakt auf einem geprüften Stand,
+   bis ihr den Pin bewusst hebt. Empfohlen für Firmen mit Change-Control.
+   Veröffentlichte Tags werden **nie** verschoben — ein Fix ist immer `N+1`.
+3. **Immer aktuell** — **kein** `ref`: die Quelle folgt `main` und damit dem jeweils
+   aktuellen Release. Nur sinnvoll, wenn ihr euer System beim NixOS-Sprung ohnehin
+   mitzieht — sonst treffen neue Module auf eine ältere NixOS-Version.
+4. **Intern spiegeln** — die Repos auf den eigenen Git-Server spiegeln
    (`git clone --mirror` + Cron/CI für `git remote update`) und die URLs hier
-   austauschen. Auch lokale Pfade sind gültig (`extensions=/srv/git/nixos-extensions.git`).
+   austauschen. Auch lokale Pfade sind gültig (`vm=/srv/git/nixos-extensions-vm.git`).
 
 **Regel:** Jede Quelle muss ein **Git-Repo** sein (auch der Spiegel) — die Versions-Identität
 einer Übernahme ist der Git-Stand der Quelle, er landet in der Commit-Message (s. u.).
-Basis und Extensions-Produkte zusammen aktualisieren (gleicher Release-Stand), nicht mischen.
+Basis und Produkte auf **denselben Release-Stand** setzen, nicht mischen.
 
 ---
 
@@ -98,15 +111,17 @@ Kommandos samt Erklärung: `git-cheatsheet.md`, Abschnitt 12.
 
 ---
 
-## 6. Ein Extensions-Produkt aktivieren (Beispiel VM-Suite)
+## 6. Ein Produkt aktivieren (Beispiel VM-Suite)
 
-1. Zugang erhalten (Collaborator auf dem Produkt-Repo), dann die Quellen-Zeile in
-   `payload-sources.conf` eintragen (Abschnitt 3) — z. B. `vm=…nixos-extensions-vm.git#v1`.
+1. Quellen-Zeile in `payload-sources.conf` eintragen (Abschnitt 3) — die öffentliche
+   HTTPS-URL genügt, es ist kein Zugang nötig. `install.sh` hat die Zeile bereits
+   auskommentiert vorbereitet.
 2. `bash update-all.sh` — das Gate zeigt einmalig alle Suite-Dateien als Diff, `J` übernimmt.
-3. Aktivieren (bewusste Host-Entscheidung, drei Zeilen in `hosts/<host>/configuration.nix`):
-   das Import der VM-Module plus `networking.nftables.enable = true;` und
-   `hardening.vmNetIsolation.enable = true;` — im Detail in den mitgelieferten
-   `README-deploy-*.md` beschrieben.
+3. Aktivieren (bewusste Host-Entscheidung): `install.sh` hat in
+   `hosts/<host>/configuration.nix` einen auskommentierten Block hinterlegt — die zwei
+   Modul-Pfade in der `imports`-Liste einkommentieren, dazu `networking.nftables.enable`
+   und `hardening.vmNetIsolation.enable`, und den Benutzer um die Gruppe `libvirtd`
+   ergänzen. Details in den mitgelieferten `README-deploy-*.md`.
 4. Deployen: `bash deploy-dev-vm.sh` (seedet beim ersten Lauf automatisch deinen SSH-Key
    nach `hosts/dev-vm/ssh.pub`) bzw. `bash deploy-browser-vm.sh` (SSH dort bewusst **aus**,
    solange du nicht selbst `hosts/browser-vm/ssh-debug.pub` anlegst — Zero-Trust-Default).
@@ -115,5 +130,4 @@ Kommandos samt Erklärung: `git-cheatsheet.md`, Abschnitt 12.
 
 ---
 
-> Stand: 2026-07-23. Produzenten-Seite (Befüllung der Auslieferungs-Repos aus dem
-> Referenz-Repo, Personalisierungs-Gate): `sync-payloads.sh` im Referenz-Repo.
+> Stand: 2026-07-27.

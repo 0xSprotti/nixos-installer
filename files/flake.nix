@@ -50,6 +50,7 @@
 
       mkHost = name: nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
+
         modules =
           lib.optionals (isPhysical name) [
             disko.nixosModules.disko

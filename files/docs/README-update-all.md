@@ -44,6 +44,14 @@ mit der frischen Version angeboten. `--dry-run` zeigt den Diff, übernimmt aber 
 Skript vor erfolgreichem Abschluss (Strg-C, Fenster zu, Fehler), wird der Bump verworfen — Repo
 und laufendes System bleiben deckungsgleich.
 
+> **Kein zweiter Baum mehr (Kurskorrektur 2026-07-27).** Kurzzeitig trug das Repo einen zweiten
+> Input `nixpkgs-unstable`, damit die dev-VM ein neueres `claude-code` bekommt. Das war ein
+> Schichtungsfehler — `flake.nix` steht im Basis-Payload, die dev-VM-Config in der VM-Schicht — und
+> ist zurückgebaut: Der Pin sitzt jetzt als `builtins.fetchTarball` in
+> `hosts/dev-vm/configuration.nix`.
+> **Für diesen Schritt heißt das:** `nix flake update` hebt weiterhin ausschließlich `nixpkgs` und
+> `disko`; der claude-code-Pin bleibt unangetastet und wandert nur bei einem bewussten Commit.
+
 **2) Host bauen → Diff → Gate → aktivieren** — erst `nixos-rebuild build` (ohne sudo, ohne
 Aktivierung), dann der Paket-Diff „aktiv → neu": `nvd`, wenn vorhanden (kommt über
 `modules/host-updates.nix`), sonst `nix store diff-closures`. Erst nach `[J/n]`-Bestätigung folgt
