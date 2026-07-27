@@ -166,6 +166,21 @@ git push -u origin main
 
 Dieses Installer-Repo und deine generierte Config sind getrennte Repos.
 
+## Qualität
+
+`install.sh` läuft durch `bash -n` und shellcheck — **Ziel und aktueller Stand: null Findings**
+(verifiziert 2026-07-27 mit shellcheck **0.11.0**). Da shellcheck nicht überall installiert ist,
+pinnt der Aufruf die Version bewusst auf einen Kanal statt auf die Flake-Registry (die auf
+*unstable* zeigt) — sonst prüft jeder Lauf potenziell gegen eine andere Version:
+
+```bash
+nix run "github:NixOS/nixpkgs/nixos-26.05#shellcheck" -- install.sh
+bash -n install.sh
+```
+
+Beides gehört vor jeden Commit. Hebt ein späterer Backport shellcheck an, können neue Checks
+greifen — dann gilt „null Findings" gegen die neue Version, und die Zahl oben wird nachgezogen.
+
 ## Lizenz
 
 Gemeinfrei (Public Domain), freigegeben über The Unlicense — siehe die Datei `UNLICENSE`. Du darfst den Code ohne Bedingungen kopieren, ändern, verwenden und verbreiten, kommerziell oder nicht.

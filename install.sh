@@ -704,11 +704,18 @@ for _x in "${DATA_BYIDS[@]}"; do [ -n "$_x" ] && TARGETS+=("$(readlink -f "$_x")
 mapfile -t TARGETS < <(printf '%s\n' "${TARGETS[@]}" | awk 'NF && !seen[$0]++')
 
 # (1) Keine Ziel-Platte darf aktuell gemountet sein (sonst falsche/benutzte Platte).
+# Die Mountpoints kommen als Array (mapfile), NICHT als newline-String mit unquotiertem
+# Wortsplitting: ein Mountpoint mit Leerzeichen (z. B. /run/media/<user>/My Passport)
+# zerfiele sonst in Bruchstuecke, und unquotiert liefe zusaetzlich Globbing gegen das CWD.
+# Betroffen waere nur die ANZEIGE — die Guard-Entscheidung unten haengt an der Anzahl —,
+# aber genau diese Liste soll zeigen, was auf der gleich zu ueberschreibenden Platte liegt.
+# printf wiederholt sein Format je Array-Element -> weiterhin eine eingerueckte Zeile
+# pro Mountpoint. (Idiom wie bei TARGETS oben; behebt SC2086.)
 for _d in "${TARGETS[@]}"; do
-  _m="$(lsblk -nro MOUNTPOINT "$_d" 2>/dev/null | grep -v '^$' || true)"
-  [ -n "$_m" ] || continue
+  mapfile -t _mounts < <(lsblk -nro MOUNTPOINT "$_d" 2>/dev/null | grep -v '^$' || true)
+  [ "${#_mounts[@]}" -gt 0 ] || continue
   echo "FEHLER: Auf der Ziel-Platte $_d sind aktuell Dateisysteme gemountet:" >&2
-  printf '   %s\n' $_m >&2
+  printf '   %s\n' "${_mounts[@]}" >&2
   if [ "${ALLOW_NONLIVE:-0}" = "1" ]; then
     echo "WARN: ALLOW_NONLIVE=1 — fahre trotz Mounts fort (disko versucht auszuhaengen)." >&2
   else
