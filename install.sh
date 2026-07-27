@@ -6,8 +6,14 @@
 #
 # WICHTIG: install.sh reist mit dem Installer-Repo — der files/-Payload daneben
 # (Module, update-all.sh, Doku, flake.nix) IST die Basis des erzeugten Repos.
-# Deshalb das Repo KOMPLETT klonen und daraus starten; ein Einzeldatei-Download
-# bricht frueh mit klarer Meldung ab.
+# Der uebliche Weg ist deshalb, das Repo komplett zu klonen und daraus zu starten:
+#   git clone <url> && cd nixos-installer && bash install.sh
+# Fehlt files/ (Einzeldatei-Download), fragt das Skript und holt sich das Repo
+# selbst — per git, ersatzweise per Tarball (curl+tar) — und startet daraus NEU.
+#
+# ANPASSUNGSPUNKT fuer eigene Spiegel: die Zeile PAYLOAD_BASIS_FALLBACK weiter
+# unten; alternativ '--from <url>'. Wer von seinem Spiegel klont, braucht beides
+# nicht — dessen 'origin' wird automatisch uebernommen.
 #
 # Pruef-Lauf (nur Dateien erzeugen, nichts loeschen):
 #   bash install.sh --dry-run
@@ -17,15 +23,129 @@
 #
 set -euo pipefail
 
-# ── Schutzgitter: files/-Payload muss neben install.sh liegen (Repo-Klon!) ──
+# ── Payload-Quelle: die EINZIGE URL im Skript ───────────────────────────────
+# Wer den Installer forkt oder intern spiegelt, aendert genau diese Zeile.
+# Sie speist alles: Selbst-Holen (unten), Fehlertexte und den Eintrag in
+# payload-sources.conf. Ohne Fork geht es auch per '--from <url>'.
+# Und im Regelfall braucht es beides nicht: wer das Repo von seinem Spiegel
+# klont, dessen 'origin' wird automatisch uebernommen (payload_basis_url).
+PAYLOAD_BASIS_FALLBACK="https://github.com/0xSprotti/nixos-installer.git"
+
+# '--from <url>' bzw. '--from=<url>' schon HIER lesen — das Schutzgitter unten
+# braucht die Quelle, bevor die eigentliche Argument-Schleife laeuft.
+PAYLOAD_FROM=""
+_pf_next=0
+for _pf_a in "$@"; do
+  if [ "$_pf_next" = "1" ]; then PAYLOAD_FROM="$_pf_a"; _pf_next=0; continue; fi
+  case "$_pf_a" in
+    --from=*) PAYLOAD_FROM="${_pf_a#*=}" ;;
+    --from)   _pf_next=1 ;;
+  esac
+done
+unset _pf_next _pf_a
+
+payload_basis_url() {   # Quelle fuer payload-sources.conf
+  local url
+  if [ -n "${PAYLOAD_FROM:-}" ]; then printf '%s' "$PAYLOAD_FROM"; return 0; fi
+  url="$(git -C "$SCRIPT_DIR" remote get-url origin 2>/dev/null || true)"
+  if [ -n "$url" ]; then printf '%s' "$url"; else printf '%s' "$PAYLOAD_BASIS_FALLBACK"; fi
+}
+
+payload_release_ref() { # Release-Linie aus dem LAUFENDEN ISO ableiten
+  # BEWUSST nur STABILE Releases: ein Unstable-ISO meldet '26.11pre123456…' — ein
+  # Ref 'release-26.11' zeigte dort auf einen Branch, den es noch nicht gibt.
+  # Deshalb muss auf die zwei Zahlengruppen ein Punkt (nixos-version) bzw. das
+  # Feldende (os-release) folgen. Nicht ermittelbar -> leerer Ref = Default-Branch.
+  local v=""
+  if command -v nixos-version >/dev/null 2>&1; then
+    v="$(nixos-version 2>/dev/null | grep -oE '^[0-9]{2}\.[0-9]{2}\.' | tr -d '.' || true)"
+    [ -n "$v" ] && v="${v:0:2}.${v:2:2}"
+  fi
+  if [ -z "$v" ] && [ -r /etc/os-release ]; then
+    v="$(grep -oE '^VERSION_ID="?[0-9]{2}\.[0-9]{2}"?$' /etc/os-release 2>/dev/null \
+         | grep -oE '[0-9]{2}\.[0-9]{2}' || true)"
+  fi
+  [ -n "$v" ] && printf 'release-%s' "$v"
+}
+
+# ── Schutzgitter: files/-Payload muss neben install.sh liegen ───────────────
+# install.sh kopiert Module, flake.nix und update-all.sh aus files/ — ohne das
+# Verzeichnis hat es nichts zu kopieren. Fehlt es, holt sich das Skript das Repo
+# selbst (Nachfrage, kein stiller Download) und startet aus dem Klon NEU.
+# Der Neustart ist Absicht: sonst liefe alte Skript-Logik auf neuen Dateien.
+# INSTALLER_SELF_FETCHED verhindert eine Schleife, falls das Holen nichts bringt.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ ! -f "$SCRIPT_DIR/files/flake.nix" ] \
    || [ ! -f "$SCRIPT_DIR/files/modules/hardening.nix" ] \
    || [ ! -f "$SCRIPT_DIR/files/update-all.sh" ]; then
-  echo "FEHLER: files/-Payload fehlt neben install.sh." >&2
-  echo "        install.sh ist KEIN Einzeldatei-Download — bitte das Installer-Repo" >&2
-  echo "        komplett klonen (git clone <repo-url>) und 'bash install.sh' daraus starten." >&2
-  exit 1
+
+  _src="${PAYLOAD_FROM:-$PAYLOAD_BASIS_FALLBACK}"
+  _ref="$(payload_release_ref)"; _ref="${_ref:-main}"
+  _name="$(basename "$_src")"; _name="${_name%.git}"
+  _dst="$PWD/$_name"
+
+  if [ -n "${INSTALLER_SELF_FETCHED:-}" ]; then
+    echo "FEHLER: Auch nach dem Holen fehlt der files/-Payload in ${SCRIPT_DIR}." >&2
+    echo "        Bitte pruefen, ob ${_src} (Linie ${_ref}) wirklich ein files/ enthaelt." >&2
+    exit 1
+  fi
+
+  echo "Der files/-Payload fehlt neben install.sh — install.sh ist kein Einzeldatei-Download."
+  echo "  Quelle: ${_src}"
+  echo "  Linie : ${_ref}"
+  echo "  Ziel  : ${_dst}"
+  read -rp "Jetzt holen und daraus neu starten? [J/n]: " _ans || _ans=""
+  case "$_ans" in
+    [nN]*)
+      echo
+      echo "Dann von Hand:"
+      echo "  git clone ${_src}"
+      echo "  cd ${_name} && bash install.sh"
+      exit 1 ;;
+  esac
+
+  # Liegt schon ein brauchbarer Klon da? Dann den nehmen statt neu zu holen.
+  if [ -f "$_dst/files/flake.nix" ]; then
+    echo "==> ${_dst} existiert bereits und traegt einen Payload — wird verwendet."
+  elif [ -e "$_dst" ]; then
+    echo "FEHLER: ${_dst} existiert, enthaelt aber keinen files/-Payload." >&2
+    echo "        Bitte umbenennen/loeschen oder das vorhandene Verzeichnis benutzen." >&2
+    exit 1
+  else
+    _got=0
+    if command -v git >/dev/null 2>&1; then
+      echo "==> git clone ${_src} (${_ref}) …"
+      if git clone -q --depth 1 --branch "$_ref" "$_src" "$_dst" 2>/dev/null; then
+        _got=1
+      elif git clone -q --depth 1 "$_src" "$_dst" 2>/dev/null; then
+        echo "    Hinweis: Linie '${_ref}' nicht gefunden — Default-Branch geholt."
+        _got=1
+      fi
+    fi
+    # Rueckfall ohne git: Tarball. Braucht nur curl+tar (im Live-ISO immer da)
+    # und hilft, wenn git fehlt oder nix-shell nicht durchkommt.
+    if [ "$_got" -eq 0 ] && command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+      echo "==> git nicht verfuegbar/erfolglos — versuche Tarball …"
+      _base="${_src%.git}"
+      _tmp="$(mktemp -d)"
+      if curl -fsSL "${_base}/archive/refs/heads/${_ref}.tar.gz" -o "$_tmp/src.tar.gz" \
+         || curl -fsSL "${_base}/archive/refs/heads/main.tar.gz" -o "$_tmp/src.tar.gz"; then
+        mkdir -p "$_dst"
+        tar xzf "$_tmp/src.tar.gz" -C "$_dst" --strip-components=1 && _got=1
+      fi
+      rm -rf "$_tmp"
+    fi
+    if [ "$_got" -eq 0 ]; then
+      echo "FEHLER: Konnte den Installer nicht holen (Netz? URL? Linie?)." >&2
+      echo "        Von Hand:  git clone ${_src} && cd ${_name} && bash install.sh" >&2
+      exit 1
+    fi
+  fi
+
+  echo "==> Starte install.sh aus ${_dst} neu …"
+  cd "$_dst" || exit 1
+  export INSTALLER_SELF_FETCHED=1
+  exec bash ./install.sh "$@"
 fi
 
 # Selbst-Bootstrap: fehlen git/mkpasswd/pciutils, einmal in einer nix-shell mit
@@ -40,10 +160,14 @@ usage() {
   cat <<'USAGE'
 install.sh - generischer NixOS-First-Boot-Installer
 
-  bash install.sh [--dry-run]
+  bash install.sh [--dry-run] [--from <url>]
 
   --dry-run, -n   nur die Config-Dateien unter ~/nixos-config erzeugen,
                   nichts partitionieren / loeschen / installieren
+  --from <url>    Installer-Repo, aus dem der files/-Payload geholt und in
+                  payload-sources.conf eingetragen wird (interner Spiegel).
+                  Ohne Angabe: das 'origin' des eigenen Klons, sonst die
+                  Vorgabe aus PAYLOAD_BASIS_FALLBACK im Skriptkopf.
   --help, -h      diese Hilfe
 
 Sicherheit: Der Installer laeuft nur vom Live-ISO (dort ist "/" ein 'overlay'). Auf einem
@@ -59,6 +183,8 @@ DRY_RUN="${DRY_RUN:-0}"   # auch per Umgebungsvariable setzbar (Fallback)
 while [ $# -gt 0 ]; do
   case "$1" in
     -n|--dry-run) DRY_RUN=1 ;;
+    --from) shift; [ $# -gt 0 ] || { echo "--from braucht eine URL (siehe --help)" >&2; exit 1; } ;;
+    --from=*) ;;   # Wert wurde bereits vor dem Schutzgitter gelesen
     -h|--help) usage; exit 0 ;;
     *) echo "Unbekannte Option: $1 (siehe --help)" >&2; exit 1 ;;
   esac
@@ -172,34 +298,6 @@ valid_locale() { # sprache_LAND.UTF-8 [@modifier]
 valid_xkb() {    # kommagetrennte Kleinbuchstaben-Codes, kein leeres Glied
   case "$1" in ""|*[!a-z,]*|,*|*,|*,,*) return 1 ;; esac
   return 0
-}
-
-# ── Payload-Quellen: Ermittlung fuer payload-sources.conf (Abschnitt 4) ──────
-# Vorgabe-Quelle, falls sich nichts Besseres ermitteln laesst. Einzige Stelle,
-# an der eine URL im Skript steht — ein Fork/Spiegel aendert nur diese Zeile.
-PAYLOAD_BASIS_FALLBACK="https://github.com/0xSprotti/nixos-installer.git"
-
-payload_basis_url() {   # bevorzugt das 'origin' des Checkouts, aus dem wir laufen
-  local url
-  url="$(git -C "$SCRIPT_DIR" remote get-url origin 2>/dev/null || true)"
-  if [ -n "$url" ]; then printf '%s' "$url"; else printf '%s' "$PAYLOAD_BASIS_FALLBACK"; fi
-}
-
-payload_release_ref() { # Release-Linie aus dem LAUFENDEN ISO ableiten
-  # BEWUSST nur STABILE Releases: ein Unstable-ISO meldet '26.11pre123456…' — ein
-  # Ref 'release-26.11' zeigte dort auf einen Branch, den es noch nicht gibt.
-  # Deshalb muss auf die zwei Zahlengruppen ein Punkt (nixos-version) bzw. das
-  # Feldende (os-release) folgen. Nicht ermittelbar -> leerer Ref = Default-Branch.
-  local v=""
-  if command -v nixos-version >/dev/null 2>&1; then
-    v="$(nixos-version 2>/dev/null | grep -oE '^[0-9]{2}\.[0-9]{2}\.' | tr -d '.' || true)"
-    [ -n "$v" ] && v="${v:0:2}.${v:2:2}"
-  fi
-  if [ -z "$v" ] && [ -r /etc/os-release ]; then
-    v="$(grep -oE '^VERSION_ID="?[0-9]{2}\.[0-9]{2}"?$' /etc/os-release 2>/dev/null \
-         | grep -oE '[0-9]{2}\.[0-9]{2}' || true)"
-  fi
-  [ -n "$v" ] && printf 'release-%s' "$v"
 }
 
 # ===================== 1. Abfragen =====================

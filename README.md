@@ -43,9 +43,7 @@ Das ist bewusst eine minimale First-Boot-Basis (auf Wunsch bereits SYS.2.3-gehä
 Im Live-Installer:
 
 ```bash
-# Repo KOMPLETT klonen — install.sh braucht den files/-Payload daneben.
-# (Ein Einzeldatei-Download bricht früh mit einer klaren Meldung ab.)
-nix-shell -p git --run 'git clone https://github.com/0xSprotti/nixos-installer.git'
+git clone https://github.com/0xSprotti/nixos-installer.git
 cd nixos-installer
 
 # 1) Prüf-Lauf: erzeugt NUR die Config-Dateien, löscht NICHTS
@@ -56,7 +54,34 @@ bash install.sh --dry-run
 bash install.sh
 ```
 
-Fehlende Tools (`git`, `mkpasswd`, `pciutils`) holt sich das Skript selbst per `nix-shell` — du musst den Aufruf also nicht mehr darin verpacken.
+Fehlende Tools (`git`, `mkpasswd`, `pciutils`) holt sich das Skript selbst per `nix-shell`.
+Ist `git` im ISO nicht vorhanden, geht der Klon auch so:
+
+```bash
+nix-shell -p git --run 'git clone https://github.com/0xSprotti/nixos-installer.git'
+```
+
+**Warum ein Klon und keine Einzeldatei?** Neben `install.sh` liegt `files/` — Module,
+`flake.nix`, `update-all.sh` und die Doku. Genau das kopiert der Installer in dein neues
+Repo; ohne dieses Verzeichnis hätte er nichts zu kopieren.
+
+Wer trotzdem nur `install.sh` heruntergeladen hat, wird nicht abgewiesen: das Skript
+fragt nach und holt sich das Repo dann selbst — per `git`, ersatzweise als Tarball über
+`curl` — und startet aus dem Klon neu. Welche Release-Linie es zieht, leitet es aus dem
+laufenden ISO ab.
+
+### Eigener Spiegel
+
+Für interne Spiegel gibt es drei Wege, in dieser Reihenfolge:
+
+```bash
+bash install.sh --from https://git.intern.example/it/nixos-installer.git
+```
+
+Wer das Repo **von seinem Spiegel geklont** hat, braucht das nicht: der Installer liest
+das `origin` seines eigenen Checkouts und trägt es automatisch ein. Und wer den Installer
+forkt, ändert die Zeile `PAYLOAD_BASIS_FALLBACK` im Skriptkopf — die einzige URL im
+Skript, aus der sich alles Weitere speist.
 
 Danach: Stick ziehen, `sudo reboot`.
 
@@ -64,7 +89,9 @@ Danach: Stick ziehen, `sudo reboot`.
 
 ## Was abgefragt bzw. erkannt wird
 
-**Abgefragt:** Hostname, Benutzername, Zeitzone, Locale, Tastaturlayout (einzeln wie `de`/`us`/`gb` oder Kombination wie `de,us` — umschaltbar mit Alt+Shift), ob eine optionale **Update-Erinnerung** eingerichtet werden soll (Standard: Ja — Enter genügt), ob die **Host-Härtung nach SYS.2.3** eingerichtet werden soll (Standard: Ja — Enter genügt) und — nur falls eine D3cold-fähige dedizierte GPU gefunden wurde — ob diese per **vfio-pci** gebunden werden soll.
+**Abgefragt:** Hostname, Benutzername, Zeitzone, Locale (Menü mit „eigene"-Option), Tastaturlayout (einzeln wie `de`/`us`/`gb` oder Kombination wie `de,us` — umschaltbar mit Alt+Shift), ob eine optionale **Update-Erinnerung** eingerichtet werden soll (Standard: Ja — Enter genügt), ob die **Payload-Quellen** eingetragen werden sollen (Standard: Ja; erscheint nur zusammen mit der Update-Erinnerung), ob die **Host-Härtung nach SYS.2.3** eingerichtet werden soll (Standard: Ja — Enter genügt) und — nur falls eine D3cold-fähige dedizierte GPU gefunden wurde — ob diese per **vfio-pci** gebunden werden soll.
+
+Alle Eingaben werden geprüft und bei Unsinn erneut abgefragt: Hostname nach RFC-1123, Benutzername nach POSIX, Zeitzone gegen die vorhandene tzdata, Locale gegen `sprache_LAND.UTF-8`. Eine Fehleingabe landet nicht mehr wortwörtlich in der Config.
 
 **Automatisch erkannt:** alle internen Platten (USB-, Wechsel- und loop-Geräte werden ausgeblendet). Die stabile by-id wird in `disk.nix` gesetzt (nvme-eui/wwn bevorzugt). Außerdem sucht der Installer **vendor-unabhängig** nach einer dedizierten GPU, deren PCIe-Parent-Port eine ACPI-`_PR3`-Power-Resource hat (Bedingung für echtes D3cold) — die primäre Display-GPU (`boot_vga`) bleibt dabei stets ausgenommen. Wird eine solche dGPU gefunden, folgt die vfio-Abfrage oben; sonst erscheint sie gar nicht. Alle GPU- und WLAN-PCI-IDs landen zusätzlich in `hosts/<host>/DETECTED-HARDWARE.txt` als Referenz für spätere Schritte.
 
@@ -136,8 +163,13 @@ Anfang** (Abschnitt 0b) die Quellen aus `payload-sources.conf`, zeigt den Diff u
 übernimmt erst nach deinem `[J/n]` — mit Provenienz-Commit
 (`git log --oneline --grep=payload` als Chronik). Versions-Pinning (`#tag`) und interne
 Spiegel sind eine Zeilen-Änderung; Zonen-Modell, bewusstes Abweichen und alle Details:
-`docs/README-payload.md`. Kostenpflichtige **Extensions** (z. B. die VM-Suite) kommen nach
-demselben Muster als zweite Quelle dazu (README-payload, §6).
+`docs/README-payload.md`. **Produkte** wie die VM-Suite kommen nach demselben Muster als
+zweite Quelle dazu (README-payload, §6) — die `vm=`-Zeile liegt bereits auskommentiert in
+der Datei, du entfernst nur das `#`.
+
+Der Installer legt `payload-sources.conf` bei der Installation an und trägt die
+Release-Linie passend zum installierten NixOS ein. Eine bestehende Datei wird bei einem
+späteren Lauf **nie** überschrieben.
 
 Hast du die Update-Erinnerung gewählt, gibt es zusätzlich ein Desktop-Icon „NixOS aktualisieren" und `update-all.sh`:
 
@@ -183,4 +215,14 @@ greifen — dann gilt „null Findings" gegen die neue Version, und die Zahl obe
 
 ## Lizenz
 
-Gemeinfrei (Public Domain), freigegeben über The Unlicense — siehe die Datei `UNLICENSE`. Du darfst den Code ohne Bedingungen kopieren, ändern, verwenden und verbreiten, kommerziell oder nicht.
+Apache License 2.0 — siehe die Datei [`LICENSE`](LICENSE).
+
+Copyright 2026 Scaly Systems
+
+Du darfst den Code kopieren, ändern, verwenden und verbreiten, kommerziell oder nicht.
+Die Lizenz verlangt, dass Lizenztext und Urhebervermerk mitgeführt werden, und räumt
+ausdrücklich Patentrechte ein.
+
+Beiträge gelten nach Abschnitt 5 der Lizenz als unter derselben Lizenz beigesteuert.
+Bei größeren Änderungen vorher ein Issue aufmachen — nicht jede Erweiterung passt zur
+Architektur, und es ist schade um die Arbeit, wenn sich das erst im Review zeigt.
