@@ -39,6 +39,36 @@ ersetzt (tmp+mv — die laufende Instanz liest ungestört weiter) und ein Neusta
 mit der frischen Version angeboten. `--dry-run` zeigt den Diff, übernimmt aber nichts;
 `--host-only` ändert an 0b nichts (Payload betrifft auch den Host).
 
+### 0c) VM-Suite aktivieren (einmalig je Host)
+
+0b holt die Suite-Module, sobald eine `vm=`-Zeile in `payload-sources.conf` steht — aber
+sie liegen dann nur im Repo. Wirksam werden sie erst, wenn die Host-Config sie importiert
+und zwei Schalter setzt; `install.sh` legt den Block dafür auskommentiert in
+`hosts/<host>/configuration.nix` an. Genau das bietet 0c an: **einmal je Host**, mit
+eigenem Gate und Default **Nein**.
+
+Das Gate ist bewusst getrennt vom 0b-Gate. Dort lautet die Frage „diese Dateien
+übernehmen?" — daraus eine Umstellung der gesamten Host-Firewall auf das
+nftables-Backend abzuleiten, wäre Zustimmung zur falschen Frage. Hinzu kommt:
+`payload-sources.conf` ist getrackt, die `vm=`-Zeile erbt also jeder weitere Host aus
+demselben Repo. Ohne Gate schaltete 0c dort die Suite frei, ohne dass es für diesen Host
+je jemand entschieden hätte.
+
+Bei `j` werden vier Zeilen einkommentiert (die zwei Modul-Pfade in `imports`,
+`networking.nftables.enable`, `hardening.vmNetIsolation.enable`), der Benutzer um die
+Gruppe `libvirtd` ergänzt und ein **eigener Commit** angelegt — `git revert` nimmt den
+ganzen Schritt zurück. Kein blindes Editieren: jede Zeile muss genau einmal im erwarteten
+Wortlaut dastehen, sonst passiert nichts und der Handweg wird ausgegeben.
+
+0c läuft **vor** dem Build in Abschnitt 2. Dessen Paket-Diff zeigt die Folge, und dessen
+Gate ist die zweite Bestätigung — erst dort wird wirklich aktiviert. Scheitert der Build,
+ist nichts geschaltet. Übersprungen wird 0c bei `--host-only`, bei `--dry-run`, ohne
+Terminal und sobald die Suite aktiv ist (danach bleibt der Abschnitt für immer still).
+
+Nach der Aktivierung bleiben die erklärenden Kommentare des Blocks stehen — sie
+beschreiben dann einen bereits erledigten Schritt. Das ist Absicht: sie automatisch
+umzuschreiben hieße, mehr Text blind zu editieren als nötig.
+
 
 **1) `nix flake update`** — bumpt `flake.lock` (nixpkgs & Co.). Ab hier wacht ein Trap: stirbt das
 Skript vor erfolgreichem Abschluss (Strg-C, Fenster zu, Fehler), wird der Bump verworfen — Repo
