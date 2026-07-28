@@ -26,20 +26,6 @@ Format je Eintrag: **Symptom** (was du siehst) · **Ursache** · **Fix**.
 - **Ursache:** Flakes bauen nur aus **Git-getrackten** Dateien. Eine **neue, ungetrackte** Datei sieht
   der Build gar nicht. Die dirty-Warnung selbst ist **harmlos und erwartet**.
 - **Fix:** vor jedem `nixos-rebuild`/`deploy-*.sh`: `git add -A`.
-- **Seit 2026-07-27 abgefangen:** Die Deploy-Skripte **brechen ab**, wenn
-  `hosts/<vm>/configuration.nix` fehlt oder nicht getrackt ist
-  (`… ist nicht von git getrackt — 'git add -A' ausfuehren.`). Vorher lief der Deploy in diesem
-  Fall durch und baute stillschweigend die **ältere getrackte Fassung** — Erfolgsmeldung, alter
-  Stand im Image.
-
-### `deploy-*-vm.sh`: „In flake.nix fehlt der '…'-Output" ✓ behoben 2026-07-27 — war Fehlalarm
-- **Historie (falls die Meldung in alten Logs auftaucht):** Beide Deploy-Skripte prüften per
-  `grep -qF '<vm>' flake.nix`, ob der Output existiert. Seit der Auto-Discovery (Baustein A) nennt
-  `flake.nix` **keinen Host mehr namentlich** — der Check schlug damit bei jedem Lauf Fehlalarm.
-- **Der damals vorgeschlagene Schnipsel war zusätzlich falscher Rat:** ein manuell ergänzter
-  `nixosConfigurations.<vm>`-Block kollidiert mit `lib.genAttrs` in der Auto-Discovery.
-- **Heute:** Geprüft wird die echte Vorbedingung (Datei existiert + ist getrackt), und zwar als
-  Abbruch statt Warnung.
 
 ### „boot.loader.grub.devices muss gesetzt sein" (Assertion)
 - **Ursache:** Irgendwo wird GRUB aktiv, obwohl das Gerät über systemd-boot bootet.
@@ -108,25 +94,6 @@ Format je Eintrag: **Symptom** (was du siehst) · **Ursache** · **Fix**.
 ### `virsh console dev-vm` „sieht aus wie der Host"
 - **Klarstellung (kein Fehler):** Der Prompt `[dev@dev-vm]` auf der seriellen Konsole **ist** die VM.
   SSH muss trotzdem **vom Host** kommen (eigenes Terminal). Raus aus der Konsole: `Strg-]`.
-
-### `error: failed to get domain 'dev-vm'` / `virsh list --all` ist leer ✓ erlebt 2026-07-27
-- **Symptom:** `virsh list --all` zeigt nichts, `virsh shutdown dev-vm` meldet
-  `error: failed to get domain 'dev-vm'` — obwohl die VM nachweislich läuft.
-- **Ursache:** Plain `virsh` als User verbindet nach `qemu:///session`. **Alle** VMs dieses Repos
-  leben in der **System**-Verbindung; die Deploy-Skripte nutzen durchgehend `sudo virsh`.
-- **Fix:** `sudo virsh list --all` bzw. `virsh -c qemu:///system …` (s. `nixos-cheatsheet.md`).
-- **Gilt für beide VMs**, nicht nur die dev-vm.
-
-### VM vor `deploy-*-vm.sh` von Hand stoppen? ✓ nicht nötig — Skript macht das selbst
-- **Klarstellung:** `deploy-dev-vm.sh` erkennt eine laufende Domain und stoppt sie selbst
-  (`Domain dev-vm laeuft — wird gestoppt (frischer Root folgt).` → `sudo virsh destroy`).
-- **Nicht verwechseln:** Die Regel „**laufende VMs werden nie angefasst**" gilt für
-  **`update-all.sh`** (dort werden nur gestoppte VMs gate-frei mit `--no-start` deployt), **nicht**
-  für den manuellen Deploy-Pfad.
-- **Konsequenz von `destroy`:** harter Stromschlag, kein sauberes Herunterfahren. Für den Root egal
-  (wird ohnehin verworfen), für `/home/dev` (ext4 auf vdb) auch — das Journal wird abgespielt.
-  **Weg sind ungespeicherte Editor-Puffer.** Wer offene Arbeit hat: vorher
-  `sudo virsh shutdown dev-vm` und den Zustand abwarten.
 
 ---
 
@@ -396,61 +363,6 @@ Wo der Trace endet, sagt die Ursache:
 - **Klarstellung (kein Fehler):** Der Workspace-Trust-Dialog kommt einmal pro Ordner, den Claude-Code
   zum ersten Mal sieht — **kein** Login-/Persistenz-Problem. Mit `1. Yes, I trust this folder` bestätigen.
 
-### Modell fehlt im `/model`-Picker (z. B. Opus 5) ✓ erlebt 2026-07-27 — Versionsfloor
-- **Symptom:** `/model` listet nur ältere Modelle (Opus 4.8, Sonnet 4.6); ein erwartetes neues
-  Modell fehlt **komplett**. Keine Fehlermeldung, kein Hinweis.
-- **Ursache:** Modelle haben **harte CLI-Mindestversionen** — Opus 5 `>= 2.1.219`,
-  Sonnet 5 `>= 2.1.197`. Ist das CLI älter, existiert die Zeile im Picker gar nicht.
-- **Kein Namensschema-Thema:** `Opus` im Picker ist dann **wirklich** Opus 4.8, nicht Opus 5 unter
-  anderem Namen — vor 2.1.219 löst der Alias `opus` auf Opus 4.8 auf.
-- **Meist auch KEIN Skriptfehler.** `claude-code` kommt aus nixpkgs, und der stabile Branch hinkt
-  strukturell ~1 Monat hinterher. `nix flake update` + Redeploy ändern dann nichts — der
-  Flaschenhals ist der **Kanal**, nicht die Update-Kette. Gegenprobe (was 26.05 gerade führt vs.
-  was es überhaupt gibt):
-  ```bash
-  curl -s https://raw.githubusercontent.com/NixOS/nixpkgs/nixos-26.05/pkgs/by-name/cl/claude-code/manifest.json
-  curl -s https://registry.npmjs.org/@anthropic-ai/claude-code | jq -r '."dist-tags".latest'
-  ```
-- **Fix (umgesetzt 2026-07-27):** `claude-code` kommt aus `nixpkgs-unstable` — per
-  `builtins.fetchTarball`-Pin (Revision + `sha256`) direkt in `hosts/dev-vm/configuration.nix`.
-  **Bewusst kein Flake-Input:** `flake.nix` steht im Basis-Payload, die dev-VM-Config in der
-  VM-Schicht; ein Input hätte den Belang der VM-Suite in die Basis getragen. Aufbau,
-  Bump-Ablauf und Rückbau stehen im Kopfkommentar des Pin-Blocks in derselben Datei.
-
-### Image-Build bricht ab: `Refusing to evaluate 'claude-code' … unfree license` ✓ zweite Definitionsstelle
-- **Ursache seit 2026-07-27:** Der `allowUnfreePredicate` **in der dev-VM-Config gilt nicht für den
-  importierten Baum**. Jede nixpkgs-Instanz trägt ihre eigene `config`; die Unfree-Prüfung läuft dort,
-  wo die Derivation entsteht — also im `import` innerhalb des Overlays.
-- **Fix:** `config.allowUnfreePredicate` **im Overlay-Import** setzen (nicht nur außen). Die beiden
-  Stellen lassen sich nicht zusammenfassen — gleiche Klasse wie die Falle in `modules/desktop.nix`.
-- **Merke:** Der äußere Predicate ist derzeit wirkungslos und steht trotzdem absichtlich da
-  (Rückfahrkarte für den Rückbau auf reines 26.05). Änderungen dort bleiben folgenlos.
-
-### `error: hash mismatch in file downloaded from …/nixpkgs/archive/<rev>.tar.gz` ✓ erlebt 2026-07-27
-- **Symptom:** `specified: sha256:0000000000…` (lauter Nullen), darunter ein `got:` mit dem echten Wert.
-- **Ursache:** Die Nullen sind die Base32-Darstellung von `lib.fakeHash` — der Platzhalter steht noch
-  im `fetchTarball`-Block, der echte Hash wurde nie eingetragen.
-- **Fix:** Den Wert aus `got:` bei `sha256` eintragen. Das ist der reguläre Bump-Ablauf (Muster wie
-  beim Rabby-Pin der browser-vm), kein Fehler.
-- **Vorab statt per Abbruch:**
-  `nix-prefetch-url --unpack https://github.com/NixOS/nixpkgs/archive/<rev>.tar.gz`
-  — die letzte Ausgabezeile ist der Hash. Die Zeile `path is '…tar.gz'` davor irritiert, ist aber
-  korrekt: gehasht wird trotzdem der **ausgepackte** Baum.
-- **Ohne `sha256` geht es nicht:** `fetchTarball` ohne Hash ist unrein, die Flake-Evaluation lehnt
-  es ab. Revision + Hash zusammen **sind** der Pin.
-
-### Build bricht ab: `claude-code ist X, benoetigt wird >= 2.1.219` ✓ Assertion greift wie geplant
-- **Einordnung:** Das ist die eingebaute Assertion, kein Defekt — sie verhindert, dass bei einem
-  ausgefallenen Overlay still ein zu altes CLI ausgeliefert wird. Seit dem `fetchTarball`-Pin gibt
-  es keinen `flake.lock`-Eintrag mehr, der die Version mitführt — diese Assertion ist die **einzige**
-  automatische Absicherung.
-- **Ursachen, in dieser Reihenfolge prüfen:**
-  1. `git add -A` vergessen → die geänderte Datei ist für die Flake-Evaluation unsichtbar.
-  2. Die gepinnte Revision ist zu alt. Was sie führt, zeigt:
-     `curl -s https://raw.githubusercontent.com/NixOS/nixpkgs/<rev>/pkgs/by-name/cl/claude-code/manifest.json`
-  3. Overlay-Block in `hosts/dev-vm/configuration.nix` verloren gegangen.
-- **Gegencheck:** `nix eval .#nixosConfigurations.dev-vm.pkgs.claude-code.version`
-
 ---
 
 ## H. Zed / waypipe (dev-VM)
@@ -623,3 +535,73 @@ Wo der Trace endet, sagt die Ursache:
   Hinweis: „Atomic modeset test failed! Keine Berechtigung" im KWin-Log ist **normal**, während
   man auf der TTY ist (KWin verliert beim VT-Wechsel den DRM-Master) — kein eigenständiges
   Fehlerbild.
+
+---
+
+## K. browser-VM: Tastaturlayout
+
+- **In der browser-VM sind y/z vertauscht, Umlaute fehlen, `-` und `/` liegen falsch.**
+  Der Gast läuft auf `us`. SPICE überträgt **Scancodes**, keinen Zeichenstrom — der Gast mappt
+  sie mit *seinem* Layout, unabhängig vom Host. Vor 2026-07-28 setzte die Gast-Config gar kein
+  Layout und bekam damit den nixpkgs-Default `us`; seither ist `de` der Produkt-Default.
+  Prüfen und beheben:
+  ```bash
+  cat hosts/browser-vm/keyboard.nix 2>/dev/null || echo "(keine Datei -> Produkt-Default de)"
+  bash deploy-browser-vm.sh --kbd de
+  ```
+
+- **`--kbd` gesetzt, aber die VM bleibt beim alten Layout.**
+  Fast immer: `hosts/browser-vm/keyboard.nix` ist **nicht getrackt**. Der Flake-Build sieht nur
+  getrackte Dateien und ignoriert eine untrackte Datei **still** — es gibt keine Fehlermeldung,
+  das Image wird schlicht mit dem Default gebaut. Dieselbe Falle wie bei `ssh-debug.pub`.
+  ```bash
+  git status --porcelain hosts/browser-vm/keyboard.nix   # '??' = untracked
+  git add hosts/browser-vm/keyboard.nix
+  bash deploy-browser-vm.sh
+  ```
+  Das Deploy-Skript macht das `git add` selbst; schlägt es fehl (z. B. `.gitignore`-Treffer),
+  warnt es explizit — die Warnung nicht übergehen.
+
+- **Alt+Shift schaltet in der VM nicht um.**
+  Nur **eine** xkb-Gruppe konfiguriert; dann gibt es nichts umzuschalten und `options` ist leer.
+  Mehrere Gruppen setzen: `bash deploy-browser-vm.sh --kbd de,gb`. Kontrolle in der VM:
+  ```bash
+  # Laufzeit-Zustand — braucht DISPLAY, sonst "Cannot open display".
+  # Als User 'browse' aufrufen (dem gehört die Autologin-Session), per SSH oder virsh console:
+  DISPLAY=:0 setxkbmap -query
+  ```
+  Meldet die Shell `setxkbmap: command not found`, ist das Tool in der VM nicht vorhanden — es
+  kommt aus dem X-Server-Paketsatz, nicht aus `environment.systemPackages`. Dann bleibt der
+  Blindtest im Brave-Fenster: `y` tippen und prüfen, ob ein `z` erscheint. Was **gebaut** wurde,
+  lässt sich unabhängig davon am Host aus dem Repo ablesen:
+  ```bash
+  cat hosts/browser-vm/keyboard.nix    # fehlt sie -> Produkt-Default de, ohne Umschalter
+  ```
+
+- **Alt+Shift schaltet auch das Host-Layout um.**
+  Erwartetes Verhalten und beabsichtigt: SPICE reicht die Scancodes durch, der Host verarbeitet
+  sein eigenes `grp:alt_shift_toggle` aus `modules/desktop.nix` parallel. Beide Seiten wechseln
+  gemeinsam — genau das ist beim Tippen auf einer physisch anderen Tastatur gewollt.
+
+- **Host und VM stehen auf verschiedenen Layouts.**
+  Zwei Ursachen: (a) Die Sets stimmen nicht überein — Host `de,gb`, Gast z. B. `de,us`. Beide
+  auf dasselbe Set in derselben Reihenfolge bringen. (b) Es wurde **außerhalb** der VM
+  umgeschaltet: der Gast bekommt davon nichts mit, und jede Session startet ohnehin auf der
+  ersten Gruppe. Ein Alt+Shift im VM-Fenster korrigiert es. Openbox hat keinen
+  Layout-Indikator, das Umschalten erfolgt blind — Test: `y` tippen und auf `z` prüfen.
+
+- **`--kbd en` bricht ab.**
+  Korrekt so. `en` ist kein xkb-Layout; gemeint ist `us` (US-QWERTY, `@` auf Shift+2) oder `gb`
+  (UK-QWERTY, `@` auf Shift+`'`). Ebenso `uk` → `gb` und `ger`/`deu` → `de`. Das Skript bricht
+  bewusst ab, statt still auf `us` zurückzufallen — sonst fiele der Fehler erst in der VM auf.
+
+- **Layout gewechselt, aber `update-all.sh` meldet die VM nicht als fällig.**
+  Der Stand-Marker bezieht `keyboard.nix` mit ein, sofern sie existiert (Formel gespiegelt in
+  `deploy-browser-vm.sh` und `update-all.sh`). Meldet `update-all` trotz Wechsel „Image
+  aktuell", ist die Datei vermutlich untracked oder liegt am falschen Ort. Gegenprobe:
+  ```bash
+  cat flake.lock hosts/browser-vm/configuration.nix hosts/browser-vm/keyboard.nix \
+    | sha256sum | cut -d' ' -f1
+  cat /var/lib/libvirt/images/browser-vm.flake-rev
+  ```
+  Unterschiedliche Werte = fällig. Im Zweifel direkt `bash deploy-browser-vm.sh`.

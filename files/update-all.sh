@@ -272,99 +272,6 @@ fi
 # === PAYLOAD-0B END ===
 
 # ---------------------------------------------------------------------------
-# 0c) VM-Suite aktivieren — einmalige, ausdrueckliche Freischaltung je Host
-# ---------------------------------------------------------------------------
-# Ausgangslage: 0b hat die Suite-Module geholt (weil 'vm=' in payload-sources.conf
-# steht), aber sie liegen nur da. Aktiv werden sie erst, wenn die Host-Config sie
-# importiert und die zwei Schalter setzt — der Block dafuer steht auskommentiert
-# in hosts/<host>/configuration.nix (erzeugt von install.sh).
-#
-# WARUM EIN EIGENES GATE und nicht einfach automatisch mit 0b: das 0b-Gate fragt
-# "diese Dateien uebernehmen?". Daraus eine Firewall-Backend-Umstellung
-# abzuleiten, waere Zustimmung zur falschen Frage. Dazu kommt: payload-sources.conf
-# ist GETRACKT — die 'vm='-Zeile erbt jeder weitere Host aus demselben Repo.
-# Ohne Gate schaltete dieser Schritt dort die Suite frei und stellte die
-# Host-Firewall um, ohne dass es fuer diesen Host je jemand entschieden haette.
-# Das Gate ist die Stelle, an der die Pro-Host-Entscheidung zurueckkommt; es
-# feuert genau EINMAL je Host und ist danach fuer immer still.
-#
-# WARUM VOR Abschnitt 2: der Build dort zeigt die Folge als nvd-Diff und fragt
-# ein zweites Mal — erst dieses Gate aktiviert wirklich. Schlaegt der Build fehl,
-# ist nichts geschaltet und 'git revert' des 0c-Commits nimmt alles zurueck.
-#
-# MECHANIK nach dem Vorbild 2c: kein blindes Editieren. Jede Zeile, die
-# einkommentiert wird, muss GENAU EINMAL im erwarteten Wortlaut vorkommen —
-# sonst passiert nichts und der Nutzer bekommt den Handweg gesagt.
-# === VMSUITE-0C BEGIN ===
-vmsuite_cfg="hosts/${HOST}/configuration.nix"
-
-if [ "$HOST_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ] && [ -t 0 ] \
-   && [ -f "$vmsuite_cfg" ] \
-   && [ -f modules/dev-vm-host.nix ] \
-   && [ -f modules/browser-vm-host.nix ] \
-   && [ -f modules/vm-net-isolation.nix ]; then
-
-  # Schon aktiv? Dann ist hier nie wieder etwas zu tun.
-  if grep -qE '^\s*\.\./\.\./modules/dev-vm-host\.nix' "$vmsuite_cfg" \
-     || grep -qE '^\s*hardening\.vmNetIsolation\.enable' "$vmsuite_cfg"; then
-    :
-  else
-    # Guards: die vier Zeilen muessen je GENAU EINMAL auskommentiert dastehen.
-    _c1="$(grep -c '^\s*# \.\./\.\./modules/dev-vm-host\.nix$'      "$vmsuite_cfg" || true)"
-    _c2="$(grep -c '^\s*# \.\./\.\./modules/browser-vm-host\.nix$'  "$vmsuite_cfg" || true)"
-    _c3="$(grep -c '^\s*# networking\.nftables\.enable = true;$'    "$vmsuite_cfg" || true)"
-    _c4="$(grep -c '^\s*# hardening\.vmNetIsolation\.enable = true;$' "$vmsuite_cfg" || true)"
-
-    if [ "$_c1" = "1" ] && [ "$_c2" = "1" ] && [ "$_c3" = "1" ] && [ "$_c4" = "1" ]; then
-      info "VM-Suite: Module liegen im Repo, sind in ${vmsuite_cfg} aber noch inaktiv."
-      warn "Aktivieren stellt die GESAMTE Host-Firewall auf das nftables-Backend um."
-      info "  Netz-Policy: browser-vm nur Internet, dev-vm nur SSH/HTTPS, Inter-VM verboten."
-      info "  Zurueck geht es mit 'git revert' des gleich erzeugten Commits."
-      read -rp "$(printf '\033[1;34m[?]\033[0m VM-Suite auf diesem Host jetzt aktivieren? [j/N]: ')" ans || ans=""
-      case "$ans" in
-        [jJyY]*)
-          sed -i \
-            -e 's|^\(\s*\)# \(\.\./\.\./modules/dev-vm-host\.nix\)$|\1\2|' \
-            -e 's|^\(\s*\)# \(\.\./\.\./modules/browser-vm-host\.nix\)$|\1\2|' \
-            -e 's|^\(\s*\)# \(networking\.nftables\.enable = true;\)$|\1\2|' \
-            -e 's|^\(\s*\)# \(hardening\.vmNetIsolation\.enable = true;\)$|\1\2|' \
-            "$vmsuite_cfg"
-
-          # libvirtd-Gruppe: ohne sie braucht jeder virsh-Aufruf root. Eigener
-          # Guard — nur wenn die Zeile eindeutig ist und die Gruppe noch fehlt.
-          if grep -q '"libvirtd"' "$vmsuite_cfg"; then
-            :
-          elif [ "$(grep -c 'extraGroups = \[ "wheel"' "$vmsuite_cfg" || true)" = "1" ]; then
-            sed -i 's|extraGroups = \[ "wheel"|extraGroups = [ "wheel" "libvirtd"|' "$vmsuite_cfg"
-            ok "Benutzer um die Gruppe 'libvirtd' ergaenzt."
-          else
-            warn "extraGroups-Zeile nicht eindeutig — 'libvirtd' bitte von Hand ergaenzen."
-          fi
-
-          if git commit -q -m "host: VM-Suite aktiviert (${HOST})" \
-                        -m "Importe dev-vm-host/browser-vm-host, networking.nftables.enable," \
-                        -m "hardening.vmNetIsolation.enable; Benutzer in Gruppe libvirtd." \
-                        -m "Bestaetigt im update-all-Gate (0c). Rueckbau: git revert." \
-                        -- "$vmsuite_cfg"; then
-            ok "VM-Suite aktiviert + committet — Abschnitt 2 zeigt die Folge als Paket-Diff."
-          else
-            warn "Commit fehlgeschlagen — Aenderung liegt uncommittet im Arbeitsbaum."
-          fi
-          ;;
-        *) info "VM-Suite nicht aktiviert — der naechste Lauf fragt erneut." ;;
-      esac
-    else
-      warn "VM-Suite-Block in ${vmsuite_cfg} nicht im erwarteten Zustand — uebersprungen."
-      warn "Von Hand: die zwei Modul-Pfade in imports sowie networking.nftables.enable"
-      warn "und hardening.vmNetIsolation.enable einkommentieren (Block ist dort kommentiert)."
-    fi
-    unset _c1 _c2 _c3 _c4
-  fi
-fi
-unset vmsuite_cfg
-# === VMSUITE-0C END ===
-
-# ---------------------------------------------------------------------------
 # 1) Flake-Inputs bumpen
 # ---------------------------------------------------------------------------
 info "Aktualisiere Flake-Inputs (nix flake update)…"
@@ -607,7 +514,16 @@ else
         continue
       fi
       # Soll-Stand nach der Marker-Formel (Spiegel: deploy-*-vm.sh).
-      vm_state=$(cat flake.lock "$vm_cfg" | sha256sum | cut -d' ' -f1)
+      # Optionale Gast-Zusatzdateien gehen MIT ein, wenn sie existieren — derzeit nur
+      # hosts/browser-vm/keyboard.nix (Tastaturlayout, s. deploy-browser-vm.sh --kbd).
+      # Ohne sie bliebe ein reiner Layout-Wechsel unsichtbar und die VM nie faellig.
+      # Kein '[ -f ] && arr+=()': schlaegt der Test fehl, ist der Exit-Code 1 und
+      # 'set -e' wuerde das Skript hier abbrechen. Deshalb die if-Form.
+      vm_marker_inputs=( flake.lock "$vm_cfg" )
+      if [ -f "hosts/${vm}/keyboard.nix" ]; then
+        vm_marker_inputs+=( "hosts/${vm}/keyboard.nix" )
+      fi
+      vm_state=$(cat "${vm_marker_inputs[@]}" | sha256sum | cut -d' ' -f1)
       vm_marker=$(cat "/var/lib/libvirt/images/${vm}.flake-rev" 2>/dev/null || true)
       if [ "$vm_marker" = "$vm_state" ]; then
         ok "${vm}: Image aktuell (Stand-Marker identisch) — kein Rebuild noetig."
