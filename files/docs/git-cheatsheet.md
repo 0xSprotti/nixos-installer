@@ -245,6 +245,82 @@ bewusst, committet und damit sichtbar abweichen.
 
 ---
 
+## 13. Payload ausliefern (Produzenten-Seite: nixos-config → Auslieferungs-Repos)
+
+Abschnitt 12 ist die *Konsumenten*-Seite. Hier geht es um den Weg **hinaus**: nach
+`sync-payloads.sh` liegen die Dateien in den Ziel-Repos und müssen dort von Hand committet
+werden. Drei Repos, zwei Linien je Produkt — genug Stellen, an denen etwas auf dem falschen
+Branch landen kann.
+
+### Zwei Regeln, die den Unterschied machen
+
+**Kein pagerndes Kommando in eine Kette oder einen Mehrzeilen-Block.** `git diff`, `git log`
+und `git show` öffnen `less`. Pastest du mehrere Zeilen am Stück, blockiert der Pager — die
+Folgezeilen landen im Eingabepuffer, `less` frisst einen Teil als Tastenkommandos, und der
+Rest wird nach dem `q` an die Shell durchgereicht **und ausgeführt**. Am 2026-07-28 sind so
+`add`, `commit` und `push` ungesehen auf `main` durchgelaufen. Also: `--no-pager` benutzen,
+oder das Kommando allein auf eine Zeile.
+
+**`git switch <branch>` statt `git branch --show-current`.** Eine Anzeige rauscht vorbei und
+du committest trotzdem falsch. Ein `switch` stellt den Zustand her, den du brauchst, und
+scheitert laut, wenn der Branch nicht existiert.
+
+### Die Routine, blockweise — je Ziel-Repo einzeln pasten
+
+```bash
+cd ~/ZIELREPO && git switch release-26.05 && git --no-pager diff --stat
+```
+```bash
+git --no-pager diff        # Volltext nur wenn nötig — allein auf der Zeile
+```
+```bash
+git add -A && git commit \
+  -m "payload: Sync aus nixos-config <rev>" \
+  -m "Quelle: nixos-config @ <rev>, Manifest: payload-<produkt>.list
+Pruefung: Personalisierungs-Gate bestanden (sync-payloads.sh)." && git push
+```
+```bash
+git switch main && git merge --ff-only release-26.05 && git push && git switch release-26.05
+```
+
+Zwei `-m`-Argumente statt einer mehrzeiligen Message: Git setzt die Leerzeile zwischen Betreff
+und Body dann selbst, und sie geht beim Kopieren nicht verloren.
+
+### Warum der letzte Block nicht optional ist
+
+`main` zeigt bei dir auf den **aktuellen Release**, `release-XX.YY` ist die lebende Linie —
+für die laufende Version tragen beide denselben Stand. Payload-Commits gehen aber auf die
+Release-Linie, `main` wird nur nachgezogen. Jedes Vergessen erzeugt Divergenz, und aus der
+entstehen die unangenehmen Fälle: ein Web-Edit auf GitHub landet auf `main`, ein frischer
+`git clone` steht auf `main`, und beides zieht Commits auf die falsche Linie.
+
+`--ff-only` ist die Sicherung: Wäre es kein reines Vorspulen, verweigert Git den Merge, statt
+still einen Merge-Commit zu bauen.
+
+### Wenn `main` und `release` doch divergiert sind
+
+```bash
+git fetch origin && git --no-pager log --oneline origin/main ^release-26.05
+```
+
+Listet die Commits, die nur auf `main` liegen. Sind es fremde Web-Edits, holst du sie mit
+`git merge origin/main` auf die Release-Linie und spulst `main` danach vor — **kein**
+`reset`, **kein** Force-Push. Tags bleiben dabei unberührt.
+
+### Tags
+
+`vXX.YY.N` sind Fixpunkte für Kunden, die nach Tag pinnen; wer den Branch pinnt, braucht sie
+nicht. Die Zählung läuft **pro Repo unabhängig**.
+
+```bash
+git tag -l                                              # was existiert hier?
+git tag -a v26.05.1 -m "<was drin ist>" && git push origin v26.05.1
+```
+
+Getaggte Commits **nie** amenden — der Tag zeigt sonst ins Leere.
+
+---
+
 ## Mini-Glossar
 
 - **stagen** (`add`) = „dieser Teil soll in den nächsten Commit". Der Stage ist die Vorauswahl.

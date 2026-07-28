@@ -579,16 +579,18 @@ Wo der Trace endet, sagt die Ursache:
   ```
 
 - **Alt+Shift schaltet auch das Host-Layout um.**
-  Erwartetes Verhalten und beabsichtigt: SPICE reicht die Scancodes durch, der Host verarbeitet
-  sein eigenes `grp:alt_shift_toggle` aus `modules/desktop.nix` parallel. Beide Seiten wechseln
-  gemeinsam — genau das ist beim Tippen auf einer physisch anderen Tastatur gewollt.
+  Tut es **nicht** — verifiziert am 2026-07-28. virt-viewer greift die Tastatur ab, der Host
+  verarbeitet sein eigenes `grp:alt_shift_toggle` während der Sitzung gar nicht. Es schaltet
+  ausschließlich der Gast; das Host-Layout steht nach dem Verlassen der VM unverändert da.
+  (Eine frühere Fassung dieser Doku behauptete das Gegenteil — abgeleitet aus der
+  SPICE-Scancode-Architektur, durch Messung widerlegt.)
 
 - **Host und VM stehen auf verschiedenen Layouts.**
-  Zwei Ursachen: (a) Die Sets stimmen nicht überein — Host `de,gb`, Gast z. B. `de,us`. Beide
-  auf dasselbe Set in derselben Reihenfolge bringen. (b) Es wurde **außerhalb** der VM
-  umgeschaltet: der Gast bekommt davon nichts mit, und jede Session startet ohnehin auf der
-  ersten Gruppe. Ein Alt+Shift im VM-Fenster korrigiert es. Openbox hat keinen
-  Layout-Indikator, das Umschalten erfolgt blind — Test: `y` tippen und auf `z` prüfen.
+  Normal und folgenlos: Beide Seiten schalten unabhängig voneinander. Die Sets müssen weder
+  übereinstimmen noch dieselbe Reihenfolge haben. Innerhalb der VM zählt allein, welche Gruppe
+  dort gerade aktiv ist — und jede Session startet auf der ersten. Ein Alt+Shift im
+  VM-Fenster wechselt sie. Openbox hat keinen Layout-Indikator, das Umschalten erfolgt blind:
+  `y` tippen und auf `z` prüfen.
 
 - **`--kbd en` bricht ab.**
   Korrekt so. `en` ist kein xkb-Layout; gemeint ist `us` (US-QWERTY, `@` auf Shift+2) oder `gb`
