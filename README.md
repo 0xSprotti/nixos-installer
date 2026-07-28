@@ -217,7 +217,7 @@ greifen — dann gilt „null Findings" gegen die neue Version, und die Zahl obe
 
 Apache License 2.0 — siehe die Datei [`LICENSE`](LICENSE).
 
-Copyright 2026 Scaly Systems
+Copyright 2026 scaly.systems
 
 Du darfst den Code kopieren, ändern, verwenden und verbreiten, kommerziell oder nicht.
 Die Lizenz verlangt, dass Lizenztext und Urhebervermerk mitgeführt werden, und räumt
