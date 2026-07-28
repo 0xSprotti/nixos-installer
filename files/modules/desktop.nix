@@ -68,6 +68,18 @@
   #  - steam*:     Steam-Client + FHS-Huelle (programs.steam auf den Arbeits-Maschinen).
   # Die Liste erlaubt nur die EVALUATION dieser Pakete — installiert wird weiterhin nur,
   # was ein Host tatsaechlich referenziert.
+  #
+  # FUER NUTZER DES INSTALLERS: 'steam*' faellt in einem Arbeitsplatz-Modul auf, ist
+  # aber folgenlos. install.sh schreibt in KEINE erzeugte hosts/<host>/configuration.nix
+  # ein 'programs.steam.enable', und Payload-Updates fassen die Host-Zone grundsaetzlich
+  # nicht an — Steam kann also weder bei der Installation noch spaeter durch ein Update
+  # hereinkommen. Ohne Aktivierung referenziert kein Host ein Steam-Paket, die vier
+  # Eintraege sind dann schlicht wirkungslos.
+  # Wer sie im eigenen Klon streichen will, kann das gefahrlos tun. Danach muesste ein
+  # Host, der Steam doch aktiviert, seine Freigabe selbst mitbringen — und weil die
+  # Funktion nicht mergefaehig ist, ginge das nur, indem er diese Definition hier per
+  # lib.mkForce komplett ersetzt (inklusive brave und nvidia-x11). Genau deshalb steht
+  # die Freigabe zentral, obwohl sie nicht jeder Host braucht.
   nixpkgs.config.allowUnfreePredicate = pkg: builtins.elem (lib.getName pkg) [
     "brave"
     "nvidia-x11"
